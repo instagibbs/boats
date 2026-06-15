@@ -109,6 +109,70 @@ this series:
 In addition to these static parameters, the server publishes its current
 offboard fee rate through a dedicated query (see ARK #7).
 
+### Fee schedule
+
+The `fees` parameter is a *fee schedule*: a set of per-operation entries the
+server publishes in ark info. Like the rest of ark info it is conveyed
+out-of-band — it is not one of the protocol-encoded objects of ARK #1 — so
+its fields are referred to by name here, and a consumer ignores entries for
+operations it does not implement. The entries used by this series are `board`
+(ARK #3), `refresh` (ARK #4), and `offboard` (ARK #7); a schedule MAY carry
+further entries (e.g. for Lightning) outside its scope.
+
+Each operation's **Fee rule**, in its own document, gives the exact formula
+that combines these fields; this section defines only their structure, types,
+and shared semantics.
+
+**Shared semantics.**
+
+* Amounts (`min_fee`, `base_fee`) are in satoshis.
+* A `ppm` is a parts-per-million rate: an integer where `10_000` = 1%.
+  Applied to a chargeable amount it yields `floor(amount × ppm / 1_000_000)`.
+* `base_fee` is a flat amount added once per operation; `min_fee`, where
+  present, is a floor the total is raised to.
+* An on-chain `fee_rate` (sat/kWU) is *not* part of the schedule; where an
+  operation needs one (offboard) it is supplied per request (ARK #7).
+
+**`ppm_expiry_table`** (used by `refresh` and `offboard`) is a list of
+entries, each:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `expiry_blocks_threshold` | u32 (blocks) | lower bound of an expiry band |
+| `ppm` | ppm | rate charged to a VTXO falling in that band |
+
+For a VTXO with `R` blocks until expiry, the applicable entry is the one with
+the greatest `expiry_blocks_threshold` not exceeding `R`; if no threshold is
+`≤ R`, that VTXO is charged nothing. The table MUST be sorted by
+`expiry_blocks_threshold` ascending and its `ppm` values MUST be
+non-decreasing along that order. The monotonicity is deliberate: a small
+disagreement about the chain tip (hence about `R`) can then only shift a VTXO
+to an adjacent band and never lowers its rate, keeping the fee robust to tip
+skew.
+
+**Entries.** `board`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `min_fee` | sats | floor on the total board fee |
+| `base_fee` | sats | flat per-board addend |
+| `ppm` | ppm | rate on the board `amount` |
+
+`refresh`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `base_fee` | sats | flat per-refresh addend |
+| `ppm_expiry_table` | list (above) | expiry-based rate over the input VTXOs |
+
+`offboard`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `base_fee` | sats | flat per-offboard addend |
+| `fixed_additional_vb` | u64 (vbytes) | vbytes charged on top of the destination output size, at the request's `fee_rate` |
+| `ppm_expiry_table` | list (above) | expiry-based rate over the input VTXOs |
+
 ## Conventions
 
 * The key words "MUST", "MUST NOT", "SHOULD", "SHOULD NOT", and "MAY" are to
@@ -136,6 +200,14 @@ offboard fee rate through a dedicated query (see ARK #7).
 * "Block delta" is a relative timelock measured in blocks, encoded as `u16`.
   "Block height" is an absolute block height, encoded as `u32`. Bounds on
   these values are specified in ARK #1.
+* The server publishes a fee **schedule** (the `fees` parameter above) that
+  sets the *protocol fee* for each operation: board (ARK #3), refresh
+  (ARK #4), and offboard (ARK #7). Both parties compute an operation's fee
+  from this schedule and the operation's own amounts rather than transmitting
+  the fee as a standalone field; each operation states its exact **Fee rule**
+  and how (or whether) the server validates it. These protocol fees are paid
+  to the server and are distinct from the on-chain miner fees carried by every
+  transaction's P2A anchor (ARK #2, ARK #6).
 
 ## Vocabulary
 

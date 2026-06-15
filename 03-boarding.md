@@ -43,9 +43,26 @@ The exit transaction is the standard exit transaction of ARK #2 with:
 * output 0: the `pubkey` policy output for `A`, value `amount − fee`
 * output 1: P2A fee anchor, value `fee`
 
-`fee` is the board fee charged by the server per its fee schedule. The
-resulting VTXO's `point` is output 0 of this transaction
+The resulting VTXO's `point` is output 0 of this transaction
 (`BOARD_FUNDING_TX_VTXO_VOUT = 0`).
+
+**Fee rule.** `fee` is the board fee charged by the server, taken from the
+`board` entry of its published fee schedule (the `fees` parameter in ark
+info, ARK #0):
+
+```
+fee = max(min_fee, base_fee + ppm * amount)
+```
+
+It is not carried in either message. Both parties compute it from `amount`
+alone — the user when constructing the exit transaction, the server when
+reconstructing it from the request fields — so the request need not include
+it. The fee is therefore never negotiated: if the two sides used different
+schedules they would derive different exit sighashes, and the server's
+cosignature would simply fail to verify on the user's side (see Requirements,
+below). Boarding has no separate fee-rejection step, unlike refresh (ARK #4)
+and offboard (ARK #7), where the server validates the fee and rejects a
+mismatch.
 
 ## Messages
 

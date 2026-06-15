@@ -56,7 +56,8 @@ while the request field is sat/kWU (the conversion is
 exceed any regular-target estimate it published within a recent window
 (15 minutes in the reference implementation), and rejects higher rates.
 
-**Fee rule.** The offboard fee is, per the server's published fee schedule:
+**Fee rule.** The offboard fee is, per the `offboard` entry of the server's
+published fee schedule (ARK #0):
 
 ```
 fee = base_fee

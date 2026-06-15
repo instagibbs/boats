@@ -154,6 +154,19 @@ funding output).
 Node transactions pay no fee; round fees are collected as the difference
 between forfeited input amounts and issued output amounts.
 
+**Fee rule.** The refresh fee is, per the `refresh` entry of the server's
+published fee schedule (ARK #0):
+
+```
+fee = base_fee + ppm-expiry fee over the input VTXOs
+```
+
+The user pays it implicitly, by requesting outputs that sum to less than its
+forfeited inputs; the server validates that the shortfall covers the computed
+fee (see Requirements below). The check is `inputs − outputs ≥ fee`, not
+equality, so a user computing against a slightly stale schedule overpays
+rather than being rejected.
+
 ### Tree signing (interactive)
 
 Sighashes: for every internal node, the BIP-341 key-spend sighash of its
@@ -274,7 +287,8 @@ Requirements (server):
   backing funds after expiry, see "Sweeping".)
 * MUST reject a request with no outputs, and MUST reject a request that names
   the same input VTXO more than once.
-* MUST verify amount balance per its fee schedule (inputs ≥ outputs + fee).
+* MUST verify the input/output balance covers the refresh fee:
+  `inputs − outputs ≥ fee`, with `fee` per the Fee rule above.
 * MUST verify each requested policy is a `pubkey` policy (HTLC policies are
   not valid round outputs) and each amount is at least `P2TR_DUST` (and at
   most `max_vtxo_amount` if set).

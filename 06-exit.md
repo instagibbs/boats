@@ -57,7 +57,7 @@ and a P2A fee anchor.
      (`hash-locked-cosigned`) are larger. Fee estimation for a level is the
      level's actual transaction weight plus the CPFP child size, paid by the
      child (and by the anchor's own `fee_amount`, when non-zero — e.g. the
-     board fee, ARK #2).
+     board fee, ARK #3).
 3. **Fee-bumping.** While unconfirmed, the user SHOULD monitor the package
    and fee-bump (replace the CPFP child) as needed; in particular, a
    third-party spend of the anchor that pays too little SHOULD be replaced.
