@@ -227,6 +227,11 @@ The VTXO for leaf `i` has:
 Such a VTXO validates structurally ("validate unsigned") but is not complete
 until the leaf cosignature and unlock preimage are added (below).
 
+A `channel-funding` leaf (the channel-refresh flow, ARK #8) is built
+identically: only the leaf transaction's output policy differs. The
+leaf-cosign taproot still uses the leaf's `user_pubkey`, and the final genesis
+item is the same `hash-locked-cosigned` transition.
+
 ## Messages
 
 ### Round events
@@ -289,9 +294,10 @@ Requirements (server):
   the same input VTXO more than once.
 * MUST verify the input/output balance covers the refresh fee:
   `inputs − outputs ≥ fee`, with `fee` per the Fee rule above.
-* MUST verify each requested policy is a `pubkey` policy (HTLC policies are
-  not valid round outputs) and each amount is at least `P2TR_DUST` (and at
-  most `max_vtxo_amount` if set).
+* MUST verify each requested policy is a `pubkey` policy — or a
+  `channel-funding` policy, accepted only as part of the channel-refresh flow
+  (ARK #8); HTLC policies are not valid round outputs — and each amount is at
+  least `P2TR_DUST` (and at most `max_vtxo_amount` if set).
 * MUST reject a `cosign_pubkey` already registered by another request in the
   same attempt (cosign pubkeys MUST be unique within a round), and MUST
   accept at most one `provide_vtxo_signatures` per cosign pubkey.
