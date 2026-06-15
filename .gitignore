@@ -1,0 +1,12 @@
+# Editor / OS cruft
+*~
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/
+
+# Build artifacts (if tooling is added later)
+/build/
+/out/
+node_modules/
