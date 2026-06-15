@@ -100,11 +100,14 @@ construction parameterized by `(server_pubkey, exit_delta, expiry_height)`.
 
 ### User-facing policies
 
-These may appear as the `policy` of a user's VTXO and in VTXO requests. Of
-them, only `pubkey` is accepted as a round (signed-tree) output and as an
-arkoor-spendable input (ARK #4, ARK #5); the HTLC policies arise only in the
-Lightning send/receive flows (out of scope for this series) and are neither
-valid round outputs nor arkoor inputs.
+These may appear as the `policy` of a user's VTXO and in VTXO requests.
+`pubkey` is the general-purpose policy: it is accepted as a round
+(signed-tree) output and as an arkoor-spendable input (ARK #4, ARK #5).
+`channel-funding` (the Lightning-channel funding output, ARK #8) is accepted
+as a round output only in the channel-refresh flow and is not
+arkoor-spendable. The HTLC policies arise only in the Lightning send/receive
+flows (out of scope for this series) and are neither valid round outputs nor
+arkoor inputs.
 
 #### `pubkey` (type byte `0x00`)
 
@@ -139,6 +142,24 @@ Fields: `user_pubkey` (33) ‖ `payment_hash` (32) ‖ `htlc_expiry` (u32) ‖
 * leaf 2: hash-delay-sign `(payment_hash, htlc_expiry_delta + exit_delta, A)`
   — user claims with the preimage; the longer delay gives the server time to
   use its expiry path if the user exits too late
+
+#### `channel-funding` (type byte `0x08`)
+
+The funding output of a Lightning channel built on Ark (ARK #8). The VTXO's
+own output *is* the channel's BOLT-3 funding outpoint.
+
+Fields: `user_pubkey` (33).
+
+* internal key: `musig(A, S)` — the cooperative 2-of-2; this is both the path
+  the off-chain Lightning commitment transaction spends and the path used to
+  forfeit, refresh, or offboard the VTXO
+* leaf: timelock-sign `(expiry_height, S)` — the server sweeps after expiry
+
+This is structurally the **cosign taproot** `(musig(A, S), S, expiry_height)`
+(see "Shared taproot constructions"). Unlike `pubkey`, it carries no user
+unilateral-exit clause: a channel VTXO's unilateral exit is timelocked by the
+Lightning commitment transaction's input `nSequence` (ARK #8), not by a VTXO
+leaf.
 
 ### Server-internal policies
 
