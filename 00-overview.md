@@ -22,12 +22,14 @@ abstract message definitions.
 * [ARK #5: Out-of-round (arkoor) Payments](05-arkoor.md)
 * [ARK #6: Emergency Exit](06-exit.md)
 * [ARK #7: Offboarding](07-offboard.md)
+* [ARK #8: Channels](08-channels.md)
 
 The following areas are part of the implemented protocol but are out of scope
-for this series at this time: Lightning send/receive (HTLC VTXOs are specified
-structurally in ARK #2, but the payment flows are not), the mailbox delivery
-protocol, and the Ark address format (see `docs/addresses.md` and
-`docs/mailbox.md`).
+for this series at this time: the Lightning send/receive payment flows (the
+HTLC VTXOs are specified structurally in ARK #2, but the payment flows that use
+them are not), the mailbox delivery protocol, and the Ark address format (see
+`docs/addresses.md` and `docs/mailbox.md`). Lightning channels built on Ark
+are specified in ARK #8.
 
 ## Introduction
 
@@ -105,6 +107,7 @@ this series:
 | `min_board_amount` | sats | minimum board amount the server advertises; the *enforced* minimum is `max(min_board_amount, P2TR_DUST)`, so a server MAY advertise a value below `P2TR_DUST` and clients MUST treat `P2TR_DUST` as the effective floor |
 | `max_vtxo_exit_depth` | u16 | maximum genesis chain length the server will extend |
 | `fees` | schedule | the fee schedule for boards, refreshes, etc. |
+| `supports_channels` | bool | whether the server offers Lightning channels on Ark (ARK #8) |
 
 In addition to these static parameters, the server publishes its current
 offboard fee rate through a dedicated query (see ARK #7).
@@ -227,3 +230,6 @@ skew.
 | emergency exit | unilateral recovery of a VTXO on-chain |
 | expiry | the height after which the server may sweep a VTXO's backing funds |
 | hArk | the hash-locked round participation protocol (ARK #4) |
+| channel VTXO | a VTXO whose output is the funding output of a Lightning channel (ARK #8) |
+| virtual funding | treating a channel VTXO's funding output as confirmed while it remains in the off-chain exit chain (ARK #8) |
+| force-close | unilateral channel exit: exit the VTXO (ARK #6), then broadcast the commitment transaction (ARK #8) |

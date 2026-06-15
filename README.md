@@ -23,6 +23,7 @@ Start with [ARK #0](00-overview.md) for conventions and the protocol overview.
 * [ARK #5: Out-of-round (arkoor) Payments](05-arkoor.md)
 * [ARK #6: Emergency Exit](06-exit.md)
 * [ARK #7: Offboarding](07-offboard.md)
+* [ARK #8: Channels](08-channels.md)
 
 ## License
 
