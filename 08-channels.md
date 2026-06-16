@@ -72,11 +72,9 @@ BOLT-3 funding pubkeys MUST be pinned to the user key `A` and the server key
 `S` — the channel uses the parties' ark keys as its funding keys — so the
 channel's BOLT-3 funding output and the VTXO's `channel-funding` output are one
 and the same taproot output (see "The channel-funding output"). The
-`channel-funding` policy carries both funding pubkeys explicitly
-(`holder_funding_pubkey` = `A`, `counterparty_funding_pubkey` = `S`; ARK #2),
-encoded rather than derived so the construction still holds if per-channel
-server keys are introduced later; for now `A` is the user's per-channel client
-key and `S` is the single server key. This pinning is what makes every
+`channel-funding` policy stores only `user_pubkey` (= `A`, the holder funding
+key); the counterparty funding key is `S`, the VTXO's `server_pubkey`, exactly
+as `pubkey` derives its server side (ARK #2). This pinning is what makes every
 cooperative spend of a channel VTXO — the commitment, forfeit, refresh, and
 offboard — an ordinary `musig(A, S)` operation; without it the cooperative
 paths could not sign against the funding output.
@@ -111,9 +109,9 @@ Beyond the VTXO trust model (ARK #0), a channel adds:
 A channel VTXO's output carries the `channel-funding` policy (ARK #2, type
 byte `0x08`):
 
-* internal key `musig(A, S)` — the cooperative 2-of-2, where `A` and `S` are
-  the channel's two funding pubkeys (`holder_funding_pubkey` and
-  `counterparty_funding_pubkey`; ARK #2);
+* internal key `musig(A, S)` — the cooperative 2-of-2, where `A` is the policy's
+  `user_pubkey` (the holder funding key) and `S` is the VTXO's `server_pubkey`
+  (the counterparty funding key); ARK #2;
 * a single leaf, timelock-sign `(expiry_height, S)` — the server's
   post-expiry sweep.
 
@@ -630,8 +628,8 @@ ARK #4 (server `pub_nonce`, `partial_sig`, first-signer one-shot).
 `channel_id` is reserved/forward-looking. The server does not need it to cosign
 the leaf or to identify the channel being refreshed: it learns the channel from
 the forfeited input on the round participation and from `teleport_init` on the
-Lightning transport, and it takes its own funding key from the leaf's
-`counterparty_funding_pubkey`. The field lets the server bind the client's LDK
+Lightning transport, and its own (counterparty) funding key is its
+`server_pubkey`. The field lets the server bind the client's LDK
 `channel_id` to its internal id should those derivations diverge (e.g. with
 per-channel server keys). The reference sends it, and the reference server
 currently ignores it.
