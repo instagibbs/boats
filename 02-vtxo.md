@@ -148,18 +148,38 @@ Fields: `user_pubkey` (33) ‖ `payment_hash` (32) ‖ `htlc_expiry` (u32) ‖
 The funding output of a Lightning channel built on Ark (ARK #8). The VTXO's
 own output *is* the channel's BOLT-3 funding outpoint.
 
-Fields: `user_pubkey` (33).
+Fields: `holder_funding_pubkey` (33) ‖ `counterparty_funding_pubkey` (33).
 
-* internal key: `musig(A, S)` — the cooperative 2-of-2; this is both the path
-  the off-chain Lightning commitment transaction spends and the path used to
-  forfeit, refresh, or offboard the VTXO
+The two fields are the channel's BOLT-3 funding pubkeys. They are pinned to the
+channel parties' Ark keys: `holder_funding_pubkey` is the user key `A` and
+`counterparty_funding_pubkey` is the server key `S` (ARK #8). As for `pubkey`,
+`A` is the client's own key — but here it is the funding key of the channel,
+not an exit-leaf key (a `channel-funding` output has no exit leaf). Both pubkeys
+are encoded explicitly rather than derived from `(A, S)`: the holder key is a
+per-channel client key, and carrying the counterparty key keeps the policy
+well-defined if per-channel server keys are introduced later.
+
+* internal key: `musig(holder_funding_pubkey, counterparty_funding_pubkey)` —
+  the cooperative 2-of-2; this is both the path the off-chain Lightning
+  commitment transaction spends and the path used to forfeit, refresh, or
+  offboard the VTXO
 * leaf: timelock-sign `(expiry_height, S)` — the server sweeps after expiry
 
-This is structurally the **cosign taproot** `(musig(A, S), S, expiry_height)`
+This is structurally the **cosign taproot** `(musig(A, S), S, expiry_height)`,
+with `musig(A, S)` = `musig(holder_funding_pubkey, counterparty_funding_pubkey)`
 (see "Shared taproot constructions"). Unlike `pubkey`, it carries no user
 unilateral-exit clause: a channel VTXO's unilateral exit is timelocked by the
 Lightning commitment transaction's input `nSequence` (ARK #8), not by a VTXO
 leaf.
+
+> **Target vs. reference.** The `timelock-sign(expiry_height, S)` leaf is the
+> *target* construction. The reference implementation currently builds this
+> output *keyspend-only* — internal key only, with an empty script tree — on
+> both the Ark and the Lightning sides; adding the expiry leaf is the pending
+> `asp-leaf-sweep-gap` fix (ARK #8) and changes the funding `scriptPubkey` on
+> both sides together. The reference also currently encodes this policy under
+> type byte `0x06`; this series assigns it `0x08`, since `0x06` is
+> `hark-forfeit` here.
 
 ### Server-internal policies
 
