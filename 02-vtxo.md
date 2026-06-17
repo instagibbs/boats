@@ -170,15 +170,12 @@ unilateral-exit clause: a channel VTXO's unilateral exit is timelocked by the
 Lightning commitment transaction's input `nSequence` (ARK #8), not by a VTXO
 leaf.
 
-> **Target vs. reference.** Two differences from the reference. (1) The
-> `timelock-sign(expiry_height, S)` leaf is the *target*: the reference builds
-> this output *keyspend-only* (internal key only, empty script tree) on both the
-> Ark and the Lightning sides; adding the leaf is the pending
-> `asp-leaf-sweep-gap` fix and changes the funding `scriptPubkey` on both sides
-> together. (2) The reference stores *both* BOLT-3 funding pubkeys in the policy
-> (66 bytes) under type byte `0x06`; this series stores only `user_pubkey` — the
-> counterparty is the VTXO's `server_pubkey` — and assigns type byte `0x08`
-> (`0x06` is `hark-forfeit` here).
+> **Target vs. reference.** The `timelock-sign(expiry_height, S)` leaf is the
+> *target*: the reference builds this output *keyspend-only* (internal key only,
+> empty script tree) on both the Ark and the Lightning sides; adding the leaf is
+> the pending `asp-leaf-sweep-gap` fix and changes the funding `scriptPubkey` on
+> both sides together. (The single-`user_pubkey` encoding under type byte `0x08`
+> now matches the reference.)
 
 ### Server-internal policies
 

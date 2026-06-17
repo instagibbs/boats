@@ -610,14 +610,6 @@ Requirements (server): the ARK #3 board requirements apply, and additionally —
   built a different leaf would simply see the cosignature fail to verify (as
   with the board fee, ARK #3).
 
-> **Target vs. reference.** This minimal form is the target. The reference
-> instead sends the two funding pubkeys and a `temporary_channel_id`
-> explicitly, signalling "channel" by the presence of both pubkeys. All three
-> are redundant: the holder always equals `user_pubkey`, the counterparty
-> always equals `S`, and the temp id is never read by the cosign path. The
-> reference also does not enforce the pinning it implies (it cosigns whatever
-> pubkeys are sent) — exactly the gap the canonical reconstruction closes.
-
 ### `leaf_vtxo_cosign` (ARK #4)
 
 Request (channel refresh): the ARK #4 fields — `vtxo_id`, user `pub_nonce`
@@ -665,15 +657,10 @@ The channel work extends the protocol without disturbing existing flows.
   without a valid exit. It does not silently produce a non-channel VTXO. A
   server advertises channel support with the `supports_channels` flag in ark
   info (ARK #0); a client MUST NOT attempt a channel open against a server that
-  does not set it. (*Target vs. reference:* `supports_channels` is the
-  prescribed capability signal; the reference does not yet carry it in ark info
-  or gate opens on it — only the safe-failure fallback above is implemented — so
-  the flag MUST be added on both sides.)
+  does not set it.
 * **New policy type.** A `channel-funding` VTXO (policy type `0x08`) is rejected
   by decoders that predate it (ARK #2 decoders reject unknown policy type
   bytes), so channel VTXOs are meaningful only between channel-aware parties.
-  (The reference currently encodes this policy under `0x06`; `0x08` is the value
-  assigned by this series — see ARK #2.)
 
 ## Security and trust notes
 
