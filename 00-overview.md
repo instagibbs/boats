@@ -230,6 +230,7 @@ skew.
 | emergency exit | unilateral recovery of a VTXO on-chain |
 | expiry | the height after which the server may sweep a VTXO's backing funds |
 | hArk | the hash-locked round participation protocol (ARK #4) |
-| channel VTXO | a VTXO whose output is the funding output of a Lightning channel (ARK #8) |
-| virtual funding | treating a channel VTXO's funding output as confirmed while it remains in the off-chain exit chain (ARK #8) |
-| force-close | unilateral channel exit: exit the VTXO (ARK #6), then broadcast the commitment transaction (ARK #8) |
+| channel VTXO | a VTXO whose output is spent by a presigned bridge transaction that funds a Lightning channel (ARK #8) |
+| bridge transaction | a presigned 0-fee tx spending a channel VTXO; its output is the channel's BOLT-3 funding output (ARK #8) |
+| virtual funding | treating a channel's funding output (the bridge's output) as confirmed while it remains in the off-chain exit chain (ARK #8) |
+| force-close | unilateral channel exit: exit the VTXO (ARK #6), then broadcast the bridge and commitment transactions (ARK #8) |

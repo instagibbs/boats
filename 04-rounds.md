@@ -229,9 +229,9 @@ until the leaf cosignature and unlock preimage are added (below).
 
 A `channel-funding` leaf (the channel-refresh flow, ARK #8) is built
 identically: only the leaf transaction's output policy differs. The
-leaf-cosign taproot still uses the leaf's user key (for a `channel-funding`
-leaf, its `holder_funding_pubkey`), and the final genesis item is the same
-`hash-locked-cosigned` transition.
+leaf-cosign taproot still uses the leaf's `user_pubkey` (`A`) — the user's
+cooperative key, exactly as for any other policy — and the final genesis item is
+the same `hash-locked-cosigned` transition.
 
 ## Messages
 
