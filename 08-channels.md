@@ -240,16 +240,18 @@ the exit-delay CSV). The Ark-specific deviations are:
 
 * **HTLC CLTV budget.** A receiver MUST reject an incoming HTLC whose CLTV
   budget is too small, and the channel's minimum `cltv_expiry_delta` MUST be at
-  least `vtxo_exit_delta + max_vtxo_exit_depth + cltv_safety_margin`: the
-  worst-case blocks to force-close *through* the VTXO exit — actualizing the
-  funding takes up to `max_vtxo_exit_depth` genesis levels (ARK #0) plus the
-  bridge, whose input is time-locked a further `vtxo_exit_delta` before the bridge
-  (and then the commitment) can confirm — plus `cltv_safety_margin`, the ordinary
-  Lightning security buffer applied to any channel. The bridge adds one
-  transaction to that worst case; its single confirmation is covered by
-  `cltv_safety_margin`. The two exit-derived terms come from ark info, so both
-  peers compute the same floor given the same buffer; each enforces it from its
-  own configuration, not on the wire.
+  least `2 * vtxo_exit_delta + max_vtxo_exit_depth + cltv_safety_margin`. Resolving
+  an HTLC on-chain crosses **two** `vtxo_exit_delta` delays in series: first to get
+  the **commitment** confirmed — force-closing *through* the VTXO exit takes up to
+  `max_vtxo_exit_depth` genesis levels (ARK #0) plus the bridge, whose input is
+  time-locked `vtxo_exit_delta` — and then, on the confirmed commitment, the
+  **HTLC success-path CSV** (above) delays the preimage claim a further
+  `vtxo_exit_delta`. Both must complete before the HTLC's absolute CLTV (after
+  which the offerer's timeout path opens), which is why `vtxo_exit_delta` appears
+  twice. `cltv_safety_margin` is the ordinary Lightning buffer and also covers the
+  bridge's and commitment's own confirmations. The exit-derived terms come from
+  ark info, so both peers compute the same floor given the same buffer; each
+  enforces it from its own configuration, not on the wire.
 
 * **Virtual funding.** The channel uses manual funding at zero confirmation
   depth — it becomes usable without its funding (bridge) transaction appearing

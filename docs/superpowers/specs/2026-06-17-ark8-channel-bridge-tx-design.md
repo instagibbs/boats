@@ -397,9 +397,15 @@ HTLC-timeout path from losing a race to a counterparty preimage-claim after a
 force-close, so the server never has to unwind the VTXO tree. It is a property of
 the commitment's HTLC outputs and is unaffected by the bridge.
 
-The **HTLC CLTV budget** floor (`vtxo_exit_delta + max_vtxo_exit_depth +
-cltv_safety_margin`) gains the bridge as effectively **one extra exit-chain
-level** (depth `+1`), absorbed by the safety margin. No structural change.
+The **HTLC CLTV budget** floor is `2 * vtxo_exit_delta + max_vtxo_exit_depth +
+cltv_safety_margin`. Resolving an HTLC on-chain crosses **two** `vtxo_exit_delta`
+delays in series: one to confirm the commitment (force-close through the VTXO exit
+— `max_vtxo_exit_depth` genesis levels plus the bridge's `vtxo_exit_delta` input
+CSV), and a second for the success-path CSV that delays the preimage claim once
+the commitment is confirmed. The bridge's own extra confirmation is covered by
+`cltv_safety_margin`. (Earlier drafts and the original taproot spec counted only
+one `vtxo_exit_delta` here — an under-count, since the success-path CSV is a full
+`exit_delta`, not a confirmation-scale buffer.)
 
 ---
 
