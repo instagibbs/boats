@@ -796,10 +796,19 @@ holds for `channel_id` — the new bridge reuses the channel's existing funding 
 (it does not rotate them; see "The teleport protocol"). If `channel_id` names no
 channel it knows (with a funding key it controls), it MUST NOT cosign. The server
 also independently learns the channel from the forfeited input on the round
-participation and from `teleport_init`, and MUST verify these agree: the channel
-named by `channel_id`, its forfeited old VTXO, and the new leaf `vtxo_id` MUST be
-consistent. The server MUST refuse to cosign a bridge that would move any VTXO
-other than this channel's expected refresh leaf into the channel's funding 2-of-2.
+participation and from `teleport_init`. It MUST ensure the refresh is a genuine,
+value-conserving re-pointing of the named channel — the channel's current backing
+VTXO is forfeited in the round (round value-conservation already guarantees the
+new funding leaf is covered by the forfeited value) — and MUST refuse to cosign a
+bridge that would move *another* channel's backing VTXO into this channel's
+funding 2-of-2. It need NOT atomically pin the specific new leaf `vtxo_id` to the
+specific forfeited outpoint: value conservation plus the channel↔forfeit
+correlation already prevent a free or cross-channel funding, and a client
+re-pointing its own channel onto a different leaf it owns (value-conserved, not
+another channel's) is not an attack. This looser binding is deliberate — it leaves
+room for future refresh extensions that combine channels (several forfeited VTXOs
+re-pointed into one channel, or splices), which a strict 1:1 forfeit↔leaf pin
+would foreclose.
 
 ### `submit_round_participation` response (ARK #4)
 
