@@ -195,8 +195,14 @@ operate; the bridge cosign reconstructs it canonically (see "Messages"). The
 bridge is the **last transaction of the channel VTXO's exit chain**: exiting a
 channel VTXO means broadcasting its genesis chain root-first (ARK #6) until the
 VTXO output confirms, then the bridge, then the commitment (see "Unilateral
-exit"). Both parties hold the fully signed bridge, so either can force-close by
-broadcasting bridge + commitment.
+exit"). The client holds the fully signed bridge — its unilateral exit (the genesis chain,
+then the bridge, then the commitment) depends on it. The server SHOULD retain it
+too, but is not required to: its recourse to a channel left stranded by an absent
+client is the expiry sweep of the channel VTXO output (see "Server recourse after
+expiry"), which needs neither the bridge nor the commitment. A server that retains
+the bridge MAY force-close before expiry by broadcasting bridge + commitment (e.g.
+to reclaim liquidity from an idle channel early) — an optimization, not a
+requirement.
 
 ## The Ark channel type
 
