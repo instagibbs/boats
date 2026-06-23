@@ -860,12 +860,20 @@ The channel work extends the protocol without disturbing existing flows.
   closing a channel hands the old VTXO to the server only in a history where
   the user has received its replacement or its payout. There is no window in
   which the user has surrendered the old channel VTXO without compensation.
-* **Expiry is a deadline.** The server may sweep the channel VTXO output after
-  `expiry_height`. A channel left un-refreshed and un-closed past expiry can
-  lose its funds. Users MUST refresh well before expiry — early enough to confirm
-  the bridge first, and before an unsettleable HTLC can block the refresh (see
-  "The refresh / force-close deadline") — exactly as for any VTXO (ARK #0), with
-  the bridge's `exit_delta` added to the margin.
+* **Expiry is a deadline, and the sweep takes the whole channel.** The server
+  may sweep the channel VTXO output after `expiry_height`. That output is a
+  single `musig(A, S)` output holding the *entire* channel capacity, and its
+  expiry leaf is the server's alone — so the sweep claims the whole value (both
+  balances and any in-flight HTLC value), not merely the server's `to_remote`
+  share. This is the deliberate flip side of "Exit guarantee preserved": there
+  is no balance-aware split at the sweep, so a channel carried past expiry loses
+  the user's *entire* balance, not just the server's recovery. The user's only
+  protection is the deadline — it MUST force-close (actualizing its balance into
+  the commitment's `to_local`, claimable on its own timelock) or refresh before
+  expiry. Users MUST therefore refresh well before expiry — early enough to
+  confirm the bridge first, and before an unsettleable HTLC can block the refresh
+  (see "The refresh / force-close deadline") — exactly as for any VTXO (ARK #0),
+  with the bridge's `exit_delta` added to the margin.
 * **Virtual funding.** The channel operates as though its funding output were
   confirmed while that output — the bridge's output 0 — lives only in the
   off-chain exit chain. The safety of this rests on the exit guarantee above: the
