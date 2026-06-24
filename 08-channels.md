@@ -113,6 +113,14 @@ Beyond the VTXO trust model (ARK #0), a channel adds:
   funds to the server's sweep.
 * **Liveness for cooperation.** Refresh and cooperative close require a
   responsive server; unilateral exit is always available without one.
+* **On-chain fee reserve for exit.** Unilateral exit is a longer 0-fee TRUC chain
+  than a plain VTXO exit — the genesis levels, then the bridge, the commitment, and
+  any HTLC second-stage transactions — each CPFP-bumped at broadcast (ARK #6). The
+  user therefore needs spendable on-chain funds to fee-bump that chain within the
+  force-close deadline (see "The refresh / force-close deadline"); a user with no
+  fee reserve can miss the deadline and lose the channel to the expiry sweep. This
+  is the ordinary emergency-exit fee assumption (ARK #0), enlarged by the extra hops
+  a channel exit adds.
 
 ## The channel VTXO and the bridge transaction
 
@@ -260,7 +268,28 @@ the exit-delay CSV). The Ark-specific deviations are:
   **HTLC success-path CSV** (above) delays the preimage claim a further
   `vtxo_exit_delta`. Both must complete before the HTLC's absolute CLTV (after
   which the offerer's timeout path opens), which is why `vtxo_exit_delta` appears
-  twice. `cltv_safety_margin` is the ordinary Lightning confirmation buffer, but
+  twice. The serial chain a force-close climbs before the preimage claim is valid:
+
+  ```
+     force-close begins
+          │  ≤ max_vtxo_exit_depth genesis levels (each ~1 block)
+          ▼
+     channel VTXO output on-chain
+          │  vtxo_exit_delta      (bridge input nSequence CSV)
+          ▼
+     bridge confirmed → commitment confirms (no extra delay of its own)
+          │  vtxo_exit_delta      (HTLC success-path CSV)
+          ▼
+     HTLC-success spend valid  ── must land before the HTLC's absolute CLTV ──
+  ```
+
+  Worked example (defaults `vtxo_exit_delta = 144`, `max_vtxo_exit_depth = 16`): the
+  floor is `2·144 + 16 + cltv_safety_margin = 304 + cltv_safety_margin` blocks
+  (~2.1 days before the buffer). The common error is to budget only the success-path
+  CSV — `1·vtxo_exit_delta + cltv_safety_margin` — and fold the rest into the margin;
+  that under-counts by a whole `vtxo_exit_delta + max_vtxo_exit_depth` and lets the
+  offerer's timeout win the on-chain race. `cltv_safety_margin` is the ordinary
+  Lightning confirmation buffer, but
   for an Ark channel it MUST be sized larger: it absorbs confirmation variance
   across the **whole serial chain** a force-close climbs — up to
   `max_vtxo_exit_depth` genesis levels, then the bridge, the commitment, and the
