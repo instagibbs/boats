@@ -529,8 +529,9 @@ The forfeit is the point of no return.
             ForfeitVtxos for the OLD VTXO
                                                   *** POINT OF NO RETURN ***
             → unlock_preimage (the old VTXO is now forfeited to the server)
- 8. [tele]  TeleportComplete/CompleteAck → both sides promote the new funding;
-            the channel stays open throughout (no ChannelReady is emitted)
+ 8. [tele]  TeleportComplete/CompleteAck → both sides promote (abandon the old
+            scope) and resume operation — gated on the step-7 forfeit; the
+            channel stays open throughout (no ChannelReady is emitted)
  9. [local] use unlock_preimage to finalize the new VTXO's exit path; remove
             the old exit path
 ```
@@ -594,8 +595,20 @@ revocation path — a catastrophic loss. LDK splicing sidesteps this by rotating
 funding key per scope; the teleport reuses it, so commitment-number continuity is
 what keeps each per-commitment secret bound to a single scope.
 
-**Promotion.** Promotion — making the new funding scope the channel's live
-funding — is asymmetric: the responder promotes on receiving `teleport_complete`,
+**Promotion and resumption.** Completing a teleport involves two distinct
+transitions that MUST NOT be conflated — and neither is the new-scope
+`commitment_signed` exchange that precedes them:
+
+* **Promote** — make the new funding scope the channel's *sole* live funding and
+  **abandon the old scope**: cease monitoring and defending the old funding
+  outpoint. (The commitment exchange only *adds* the new scope alongside the old;
+  both stay live and monitored until promotion. A party that has promoted no
+  longer watches the old funding outpoint, so it will neither react to nor
+  penalize an old-scope commitment — including a revoked one.)
+* **Resume** — exit quiescence (the BOLT-2 `stfu` the channel entered to begin the
+  teleport) so HTLCs may again be offered, forwarded, and settled on the channel.
+
+Promotion is asymmetric: the responder promotes on receiving `teleport_complete`,
 the initiator on receiving `teleport_complete_ack`. The channel never leaves its
 normal operating state and emits no `channel_ready`. A `teleport_abort` (or a
 disconnect before promotion) leaves the channel on its old funding outpoint; the
@@ -604,23 +617,39 @@ both funding scopes until promotion resolves.
 
 **Ordering against the forfeit.** Teleport's commitment exchange — `teleport_init`
 through the new-scope `commitment_signed` — completes *before* the old channel
-VTXO is forfeited. Promotion (`teleport_complete` / `teleport_complete_ack`)
-happens *after* the forfeit returns the unlock preimage. Teleport completion
-does not consume the unlock preimage: the preimage finalizes the new VTXO's
-*exit* path (ARK #4), not the channel state. The forfeit is the point of no
-return (see "Refresh").
+VTXO is forfeited, leaving the channel **dual-scope and quiesced**: both funding
+scopes carry a valid commitment, both outpoints are monitored, and no HTLC moves.
+Both **promotion** and **resumption** happen only *after* the forfeit — for the
+server, after it has released the unlock preimage; for the client, after it has
+received it. The dual-scope quiesced state is the safe place to wait for the
+forfeit, and a party MUST remain there until the forfeit resolves. The old-scope
+commitment stays valid (non-revoked) throughout this wait — quiescence holds the
+commitment number fixed (it continues across the teleport, never advancing; see
+"Commitment numbering continues across scopes"), so the old scope is a sound
+fallback on abort. Resumption is the first advance past that number, and thus the
+moment the old commitment's revocation secret is revealed — a further reason
+resumption, like promotion, MUST follow the forfeit. Teleport completion does not
+consume the unlock preimage: the preimage finalizes the new VTXO's *exit* path
+(ARK #4), not the channel state. The forfeit is the point of no return (see
+"Refresh").
 
 **Dual-scope safety.** Between the new-scope `commitment_signed` and promotion,
 both funding scopes carry a valid commitment; each party MUST run a chain monitor
 for **both** funding outpoints until promotion resolves. The forfeit, not a
-teleport message, is the pivot: once the old VTXO is forfeited the new scope is
+teleport message, is the pivot. Once the old VTXO is forfeited the new scope is
 authoritative, and the client MUST NOT broadcast the old-scope commitment — an
 old-scope force-close would lose the channel VTXO output to the server's forfeit
 (which spends it with no timelock, beating the old bridge's `exit_delta`), so the
 client's balance is recoverable only on the new scope. Symmetrically, the server
-MUST confirm the forfeit has completed before promoting on `teleport_complete`:
-promoting — and discarding the old scope — while the client still holds an
-unforfeited old VTXO would let it claim on both scopes.
+MUST gate **both** promotion and resumption on the forfeit having completed — on
+its own release of the unlock preimage — even though both are triggered by the
+same `teleport_complete` message. Each is unsafe alone if done early: promoting
+**abandons the old scope's defense**, letting a counterparty that still holds the
+unforfeited old VTXO force-close the old scope — even at a revoked state —
+unpunished; resuming lets that counterparty move its balance out on the new scope
+while the old scope is still its own to claim. The forfeit is what makes the old
+scope unclaimable (it spends the old VTXO output ahead of the old bridge), so it
+MUST precede both.
 
 ## Offboard
 
