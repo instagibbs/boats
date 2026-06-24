@@ -270,7 +270,15 @@ the exit-delay CSV). The Ark-specific deviations are:
   needed margin realistic). The exit-derived terms come from
   the channel's pinned `exit_delta` (below) and from `max_vtxo_exit_depth` (ark
   info), so both peers compute the same floor given the same buffer; each
-  enforces it from its own configuration, not on the wire. `max_vtxo_exit_depth`
+  enforces it from its own configuration, not on the wire. Because `exit_delta`
+  is pinned per channel ("`exit_delta` is pinned at open"), the floor is a
+  **per-channel** quantity, and a refresh — which reuses the pinned `exit_delta`
+  — does not move it. A receiver that commits to a single CLTV floor not bound to
+  one channel — for example the `min_final_cltv_expiry_delta` of a BOLT-11 invoice
+  payable over any of its channels — MUST therefore advertise the **maximum**
+  floor across the channels it could receive on, so the budget holds whichever
+  channel the payment lands on (the value is fixed when the invoice is issued).
+  `max_vtxo_exit_depth`
   is also the upper bound the budget assumes on the **channel VTXO's own** exit
   depth — the number of genesis levels a force-close must climb: a channel VTXO is
   only ever a board leaf (depth 1) or a refresh round leaf, and the client MUST
