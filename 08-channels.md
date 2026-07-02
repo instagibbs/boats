@@ -255,24 +255,27 @@ the exit-delay CSV). The Ark-specific deviations are:
   extra CSV. Every spend of the success branch — the presigned second-stage
   HTLC-success transaction and a direct preimage claim of the counterparty's
   commitment output alike — MUST set `nSequence` to at least `exit_delta` or it
-  is consensus-invalid. In addition, both presigned second-stage transactions —
-  HTLC-success *and* HTLC-timeout — set `nSequence = exit_delta`, keeping the
-  two templates uniform; the HTLC signatures commit to `nSequence`, so peers
-  that disagree on it simply fail to verify each other's signatures. Because
-  these are v3 transactions with `nSequence < 0x80000000`, BIP-68 enforces that
-  sequence as a real relative timelock, with a deliberate consequence: the
-  broadcaster's own second-stage HTLC-timeout is also delayed `exit_delta`
-  after its commitment confirms, while a *direct* timeout claim of the
-  counterparty's commitment output carries no relative delay. The success CSV
-  therefore guarantees the offerer's timeout path is never *behind* a
-  preimage claim: it leads by `exit_delta` on a counterparty commitment and at
-  worst ties on its own. A preimage spend that does win a tie reveals the
-  preimage on-chain in time for the offerer to settle upstream — the CLTV
-  budget below covers the timeout path's own `exit_delta` delay via the same
-  `2 * vtxo_exit_delta` term. This success CSV MUST equal the channel's pinned
-  `exit_delta` (see "`exit_delta` is pinned at open" below); both peers use that
-  fixed value rather than re-deriving it per update or negotiating it. BOLT-3 has
-  no success-branch CSV.
+  is consensus-invalid; the second-stage HTLC-success transaction is presigned
+  with `nSequence = exit_delta`. The second-stage HTLC-timeout transaction is
+  presigned with the baseline `nSequence` (0) — **not** `exit_delta`. The
+  asymmetry is deliberate and normative: these are v3 transactions, so any
+  `nSequence` below `0x80000000` is a real BIP-68 relative timelock, and
+  presigning the timeout template at `exit_delta` would delay the offerer's
+  own timeout claim by the very delta that exists to protect it, turning its
+  head start into a fee-race tie (and re-opening the replacement-cycling
+  window the head start closes). The HTLC signatures commit to `nSequence`,
+  so peers that disagree on either template simply fail to verify each
+  other's signatures. With the asymmetry, a timeout claim strictly leads a
+  preimage claim by `exit_delta` on whichever commitment confirms — the
+  direct timeout claim of a counterparty commitment carries no relative
+  delay either. This is what guarantees that an HTLC whose absolute CLTV
+  expired while the slow exit chain was confirming resolves
+  deterministically to the timeout side rather than racing, so the offerer
+  never depends on out-racing (or extracting a preimage from) a competing
+  claim. This success CSV MUST equal the channel's pinned `exit_delta` (see
+  "`exit_delta` is pinned at open" below); both peers use that fixed value
+  rather than re-deriving it per update or negotiating it. BOLT-3 has no
+  success-branch CSV.
 
 * **HTLC CLTV budget.** A receiver MUST reject an incoming HTLC whose CLTV
   budget is too small, and the channel's minimum `cltv_expiry_delta` MUST be at
