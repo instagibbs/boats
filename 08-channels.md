@@ -204,27 +204,29 @@ bridge is the **last transaction of the channel VTXO's exit chain**: exiting a
 channel VTXO means broadcasting its genesis chain root-first (ARK #6) until the
 VTXO output confirms, then the bridge, then the commitment (see "Unilateral
 exit"). The client holds the fully signed bridge — its unilateral exit (the genesis chain,
-then the bridge, then the commitment) depends on it. The server SHOULD retain it
-too, but is not required to: its recourse to a channel left stranded by an absent
-client is the expiry sweep of the channel VTXO output (see "Server recourse after
-expiry"), which needs neither the bridge nor the commitment. A server that retains
-the bridge MAY force-close before expiry by broadcasting bridge + commitment (e.g.
-to reclaim liquidity from an idle channel early) — an optimization, not a
-requirement.
+then the bridge, then the commitment) depends on it. The server MAY retain it
+too, but need not (the reference does not): its recourse to a channel left
+stranded by an absent client is the expiry sweep of the channel VTXO output (see
+"Server recourse after expiry"), which needs neither the bridge nor the
+commitment. A server that does retain the bridge can force-close before expiry
+by broadcasting bridge + commitment (e.g. to reclaim liquidity from an idle
+channel early) — an optimization, not a requirement.
 
 ## The Ark channel type
 
 A channel on Ark is not a vanilla BOLT channel: the parties MUST negotiate a
 dedicated **Ark channel type**. It is not a registered BOLT feature — Ark-aware
-peers agree on it out of band — but at channel open it is carried in the
-`channel_type` as an experimental feature pair, bits `400/401` (the reference's
-`ark_channel` feature; the required even bit `400` is the one set in a
+peers agree on it out of band — but it is negotiated as an experimental feature
+pair, bits `400/401` (the reference's `ark_channel` feature): peers advertise
+the *optional* bit `401` in `init` (and `node_announcement`) — alongside the
+optional `zero_fee_commitments` bit, so the dependency bundle is recognizable —
+and at channel open the *required* bit `400` is the one set in the
 `channel_type`, alongside the `static_remote_key` and `zero_fee_commitments`
-bits it implies). The pair is experimental — chosen clear of allocated BOLT bits
-and not advertised in `init` / `node_announcement` — so the exact number is
-subject to change if the type is ever standardized. The server MUST refuse to
-open a channel of any other type (channel support is advertised by the
-`supports_channels` flag, see "Compatibility").
+bits it implies. The pair is experimental — chosen clear of allocated BOLT
+bits — so the exact number is subject to change if the type is ever
+standardized. The server MUST refuse to open a channel of any other type
+(channel support on the Ark service is advertised by the `supports_channels`
+flag, see "Compatibility").
 
 The Ark channel type is a BOLT channel using the `zero_fee_commitments` option
 (BOLT #9 feature 40/41, specified in BOLT #3), with the Ark-specific deviations
@@ -249,11 +251,25 @@ Lightning keys (Actors and keys), and the commitment is an unmodified
 the exit-delay CSV). The Ark-specific deviations are:
 
 * **HTLC success-path CSV.** Each HTLC output's preimage-claim (success) branch
-  gains an extra `<exit_delta> OP_CSV OP_DROP`, and the HTLC-claim transaction's
-  `nSequence` is at least `exit_delta`. This is what guarantees that, after a
-  force-close, the server's HTLC-timeout path cannot lose the race to a
-  counterparty's preimage-claim, so the server never has to unwind the VTXO tree
-  to resolve an HTLC. This success CSV MUST equal the channel's pinned
+  gains an extra `<exit_delta> OP_CSV OP_DROP`; the timeout branch carries no
+  extra CSV. Every spend of the success branch — the presigned second-stage
+  HTLC-success transaction and a direct preimage claim of the counterparty's
+  commitment output alike — MUST set `nSequence` to at least `exit_delta` or it
+  is consensus-invalid. In addition, both presigned second-stage transactions —
+  HTLC-success *and* HTLC-timeout — set `nSequence = exit_delta`, keeping the
+  two templates uniform; the HTLC signatures commit to `nSequence`, so peers
+  that disagree on it simply fail to verify each other's signatures. Because
+  these are v3 transactions with `nSequence < 0x80000000`, BIP-68 enforces that
+  sequence as a real relative timelock, with a deliberate consequence: the
+  broadcaster's own second-stage HTLC-timeout is also delayed `exit_delta`
+  after its commitment confirms, while a *direct* timeout claim of the
+  counterparty's commitment output carries no relative delay. The success CSV
+  therefore guarantees the offerer's timeout path is never *behind* a
+  preimage claim: it leads by `exit_delta` on a counterparty commitment and at
+  worst ties on its own. A preimage spend that does win a tie reveals the
+  preimage on-chain in time for the offerer to settle upstream — the CLTV
+  budget below covers the timeout path's own `exit_delta` delay via the same
+  `2 * vtxo_exit_delta` term. This success CSV MUST equal the channel's pinned
   `exit_delta` (see "`exit_delta` is pinned at open" below); both peers use that
   fixed value rather than re-deriving it per update or negotiating it. BOLT-3 has
   no success-branch CSV.
@@ -285,7 +301,8 @@ the exit-delay CSV). The Ark-specific deviations are:
 
   Worked example (defaults `vtxo_exit_delta = 144`, `max_vtxo_exit_depth = 16`): the
   floor is `2·144 + 16 + cltv_safety_margin = 304 + cltv_safety_margin` blocks
-  (~2.1 days before the buffer). The common error is to budget only the success-path
+  (~2.1 days before the buffer; the reference sizes the margin at 18 blocks,
+  for a 322-block floor). The common error is to budget only the success-path
   CSV — `1·vtxo_exit_delta + cltv_safety_margin` — and fold the rest into the margin;
   that under-counts by a whole `vtxo_exit_delta + max_vtxo_exit_depth` and lets the
   offerer's timeout win the on-chain race. `cltv_safety_margin` is the ordinary
@@ -411,9 +428,10 @@ is both ASP and Lightning peer):
  2. [local] build the board tx (exit-tx output 0 = channel-funding policy) and
             the bridge over the channel VTXO output (out0 = P2WSH 2-of-2 funding,
             out1 = P2A, nSequence = exit_delta)
- 3. [Ark]   RequestBoardCosign (channel_id, + leaf nonce, + bridge nonce) → ASP
-            reconstructs and cosigns the musig(A,S) leaf exit tx AND the bridge
-            (using the channel's funding keys it already holds); finalize both
+ 3. [Ark]   RequestBoardCosign (channel_id, + leaf nonce, + bridge nonce) →
+            server reconstructs and cosigns the musig(A,S) leaf exit tx AND the
+            bridge (using the channel's funding keys it already holds);
+            finalize both
  4. [BOLT]  provide bridge_txid:0 as the funding outpoint; exchange the initial
             commitment (FundingCreated / FundingSigned) — stock ECDSA 2-of-2
  5. [gate]  SAFETY GATE: genesis exit chain + bridge + initial commitment exist
@@ -478,7 +496,14 @@ is issued as a round leaf.
 * **Fee.** The server's `refresh` fee (ARK #4) applies.
 
 Refresh uses the ARK #4 round messages — round participation, the completion
-steps (including leaf cosign), and `forfeit_vtxos`. The channel-specific
+steps (including leaf cosign), and `forfeit_vtxos` — in the **delegated**
+participation mode (`submit_round_participation`): a `channel-funding` output
+is not a valid request in an interactive `submit_payment`. The server
+correlates the participation to a channel through its forfeited input — the
+channel's current backing VTXO — and MUST reject a participation requesting a
+`channel-funding` output whose inputs do not include the current backing VTXO
+of one of its channels (rejecting at participation, rather than failing the
+later leaf cosign, keeps the abort free for both sides). The channel-specific
 additions are: on the leaf cosign request, a `channel_id` (so the server maps the
 new leaf to the channel being refreshed and looks up its funding keys) plus a
 bridge nonce — so the server reconstructs and cosigns the new **bridge** in the
@@ -522,10 +547,15 @@ It carries `X` into the teleport as `responder_value_removal_sat` — the amount
 which the **server's** side of the new commitment is reduced (see "The teleport
 protocol") — reduces its **own** side by `fee`, and bounds `X` by a local
 maximum, aborting if the server's cap implies a larger withdrawal than it will
-accept. A refresh requires the fee to fit on the client's side (`fee ≤` the
-client's channel balance) and `X ≤` the server's; a channel whose client side
-cannot cover the fee cannot be refreshed and must be closed instead (offboard or
-force-close).
+accept. The server MUST apply the same derivation when accepting the new-scope
+commitment: the client's side shrinks by exactly the `refresh` fee the server
+computes from its own schedule and the server's side by exactly `X`, with the
+new commitment spending the new bridge's funding value `V_new`; a commitment
+that shifts any of the reduction onto the other side MUST be rejected (aborting
+the teleport, a safe abort — the old channel is still intact). A refresh
+requires the fee to fit on the client's side (`fee ≤` the client's channel
+balance) and `X ≤` the server's; a channel whose client side cannot cover the
+fee cannot be refreshed and must be closed instead (offboard or force-close).
 
 ### Added by the channel layer: the teleport
 
@@ -556,8 +586,9 @@ The forfeit is the point of no return.
  4. [local] build the new bridge over the new VTXO output, reusing the channel's
             existing funding keys → new funding outpoint = new_bridge_txid:0
  5. [Ark]   RequestLeafVtxoCosign (channel id, + leaf nonce, + bridge nonce) →
-            ASP cosigns the new leaf AND the new bridge (reusing the channel's
-            funding keys); finalize + verify both musig(A,S) signatures
+            server cosigns the new leaf AND the new bridge (reusing the
+            channel's funding keys); finalize + verify both musig(A,S)
+            signatures
  6. [tele]  teleport: Stfu (quiesce) → settle in-flight HTLCs → TeleportInit
             (new_funding_txo = bridge:0, no nonces) / TeleportAck → exchange
             commitment_signed on the new funding outpoint (stock ECDSA); wait
@@ -600,6 +631,14 @@ client) and the responder (the server):
 | `teleport_complete` | initiator → responder | `channel_id` |
 | `teleport_complete_ack` | responder → initiator | `channel_id` |
 | `teleport_abort` | either | `channel_id` |
+
+The reference carries these as Lightning messages with experimental type
+numbers 82–86 (`teleport_init` 82, `teleport_ack` 83, `teleport_abort` 84,
+`teleport_complete` 85, `teleport_complete_ack` 86);
+`responder_value_removal_sat` rides as an optional TLV (type 4) defaulting
+to 0. Like the `ark_channel` feature pair, these numbers sit in unassigned
+BOLT message space and are subject to change if the protocol is ever
+standardized.
 
 After `teleport_init` / `teleport_ack`, the parties exchange BOLT
 `commitment_signed` for the **new** funding scope (identified by the new funding
@@ -698,12 +737,40 @@ held off-chain, are simply discarded.
 The forfeit is the standard ARK #7 connector-bound forfeit of the channel
 VTXO — a `musig(A, S)` cosignature over a forfeit transaction that also spends
 a connector output, valid only in a chain where the offboard transaction (and
-thus the user's payout) exists. The offboard request, fee (`offboard`,
-ARK #7), connector fanout, and atomicity are all as in ARK #7, using the
-`prepare_offboard` / `finish_offboard` messages unchanged.
+thus the user's payout) exists. The offboard request, connector fanout, and
+atomicity are all as in ARK #7, using the `prepare_offboard` /
+`finish_offboard` messages unchanged. The **balance rule**, however, is
+amended (below): ARK #7's exact-balance check cannot hold for a channel input.
 
 The channel layer adds (referenced) the close negotiation: the channel is
 quiesced and its settled balance read before the offboard amount is fixed.
+
+### Amount rule
+
+A channel VTXO's `amount` is the whole channel capacity `V` — *both* sides'
+settled balances — while the offboard pays out only the user's side. ARK #7's
+requirement that the input amounts equal `net_amount` plus the fee *exactly*
+therefore cannot apply to a channel input; in its place:
+
+* An offboard that spends a channel VTXO MUST spend it as the request's only
+  input (the amended rule is per-channel; mixing inputs would make the
+  balance and fee attribution ambiguous).
+* `net_amount + fee ≤ V`. The difference `V − net_amount − fee` is the
+  server's own settled channel balance: no output pays it — the server keeps
+  it implicitly by collecting the forfeit of the whole VTXO.
+* The server MUST verify `net_amount` against the channel's quiesced settled
+  balance — it is the channel peer, so it holds the same figure:
+  `net_amount = user_balance − fee`. It MUST NOT cosign an offboard paying
+  more (the excess would come out of the server's own side), and SHOULD
+  reject one paying less, since the user has no way to recover the shortfall
+  once the channel is torn down. This check requires the channel to be
+  quiesced with all in-flight HTLCs settled before `prepare_offboard`: an
+  unsettled HTLC has no side to be attributed to.
+* `fee` is the ARK #7 offboard fee (`offboard` schedule entry) with the
+  user's settled balance as the chargeable amount for the ppm-expiry
+  component: the user pays fees on its own funds, not on the server's share.
+
+The exact-balance rule of ARK #7 is unchanged for non-channel inputs.
 
 ### Sequence
 
@@ -814,7 +881,7 @@ the user to the server:
 | `expiry_height` | u32 | chosen expiry height |
 | `user_pubkey` | pubkey | `A` |
 | `pub_nonce` | musig_pub_nonce | the user's MuSig2 public nonce for the leaf exit tx, bound to its sighash and the tweaked `musig(A, S)` (ARK #3) |
-| `channel_id` | 32 bytes | the LDK channel id of the channel being opened; its presence marks this as a channel board (absent for a plain `pubkey` board) |
+| `channel_id` | 32 bytes | the identifier under which both peers address the channel being opened on the Lightning transport (for a v1 open, the BOLT-2 *temporary channel id* — the final channel id is assigned only once the funding outpoint exists); its presence marks this as a channel board (absent for a plain `pubkey` board), and it MUST match the identifier under which the server stored the channel's funding keys |
 | `bridge_pub_nonce` | musig_pub_nonce | the user's MuSig2 public nonce for the **bridge** key-path sighash (present only for a channel board) |
 
 The first five fields are exactly ARK #3. `A` (`user_pubkey`) is the user's
@@ -844,6 +911,11 @@ Requirements (server): the ARK #3 board requirements apply, and additionally —
   redirected at an already-funded channel. No pinning check is otherwise needed: a
   client that built a different leaf or bridge would simply see the cosignature
   fail to verify (as with the board fee, ARK #3).
+* The server MUST NOT cosign a `channel-funding` output except together with
+  its bridge in the same exchange (equivalently: never without `channel_id`).
+  A channel-funding output carries no user spending clause at all (ARK #2), so
+  a channel-funding VTXO without a cosigned bridge would strand the funds
+  behind server cooperation until the expiry sweep.
 
 Nonce freshness (both the board and leaf cosigns): the user commits its
 `bridge_pub_nonce` (and the leaf `pub_nonce`) in the request and produces its own
@@ -856,9 +928,9 @@ failure handling).
 ### `leaf_vtxo_cosign` (ARK #4)
 
 Request (channel refresh): the ARK #4 fields — `vtxo_id`, user `pub_nonce` (bound
-to the leaf sighash) — plus, for a channel leaf: `channel_id` (32 bytes, the LDK
-channel id of the channel being refreshed) and `bridge_pub_nonce` (the user's
-nonce for the new bridge's key-path sighash). Both are absent for a non-channel
+to the leaf sighash) — plus, for a channel leaf: `channel_id` (32 bytes, the
+BOLT-2 channel id of the channel being refreshed) and `bridge_pub_nonce` (the
+user's nonce for the new bridge's key-path sighash). Both are absent for a non-channel
 leaf. Response: as ARK #4 (server `pub_nonce`, `partial_sig`, first-signer
 one-shot), extended with the server's bridge `pub_nonce` + `partial_sig`.
 
@@ -866,7 +938,10 @@ As in the board cosign, the server reconstructs and cosigns both the new leaf ex
 tx and the new **bridge** in this one exchange, using the funding keys it already
 holds for `channel_id` — the new bridge reuses the channel's existing funding keys
 (it does not rotate them; see "The teleport protocol"). If `channel_id` names no
-channel it knows (with a funding key it controls), it MUST NOT cosign. The server
+channel it knows (with a funding key it controls), it MUST NOT cosign. For a leaf
+whose policy is `channel-funding`, `channel_id` and `bridge_pub_nonce` MUST be
+present, and the server MUST NOT cosign such a leaf without also cosigning its
+bridge — the no-bridgeless-VTXO rule of the board cosign, above. The server
 also independently learns the channel from the forfeited input on the round
 participation and from `teleport_init`. It MUST ensure the refresh is a genuine,
 value-conserving re-pointing of the named channel — the channel's current backing

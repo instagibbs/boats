@@ -167,10 +167,12 @@ ARK #8).
 
 This is the **cosign taproot** `(musig(A, S), S, expiry_height)` (see "Shared
 taproot constructions") — the same construction as a board funding output, with
-`A` = `user_pubkey`. It differs from `pubkey` only in carrying no user
-unilateral-exit leaf: a channel VTXO's unilateral-exit delay rides on the bridge
-transaction's input `nSequence` (ARK #8), not on a VTXO leaf, so no
-`delayed-sign(exit_delta, A)` clause is present.
+`A` = `user_pubkey`. It differs from `pubkey` in its leaf set: the user's
+`delayed-sign(exit_delta, A)` unilateral-exit leaf is dropped — a channel VTXO's
+unilateral-exit delay rides on the bridge transaction's input `nSequence`
+(ARK #8), not on a VTXO leaf — and the server's expiry leaf, which `pubkey` does
+not carry, is added, giving the server its post-expiry recourse over an output
+that would otherwise have no unilateral spending path at all.
 
 ### Server-internal policies
 
