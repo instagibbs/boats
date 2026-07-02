@@ -371,6 +371,18 @@ round and signs the tree on the participant's behalf: the resulting leaves
 carry no `cosign_pubkey` (absent in the leaf spec), so only the global
 cosign key signs their branches.
 
+Requirements (server): the policy-type, dust, and `max_vtxo_amount` admission
+checks listed for `submit_payment` above apply here too — they are not specific
+to the interactive path. In particular, this delegated path is the **only** one
+in which a `channel-funding` output policy is admitted (ARK #8): the server MUST
+accept a `channel-funding` request here and MUST reject one on the interactive
+`submit_payment`. For a `channel-funding` request the server MUST additionally
+verify that `input_vtxos` include the current backing VTXO of one of its
+channels, rejecting **at participation time** (not deferring to the later leaf
+cosign) otherwise (ARK #8, "Refresh"). HTLC policies are not valid round
+outputs, and each requested amount MUST be at least `P2TR_DUST` (and at most
+`max_vtxo_amount` if set).
+
 ### `round_participation_status`
 
 Request: `unlock_hash`. Response:

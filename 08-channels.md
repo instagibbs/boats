@@ -627,21 +627,21 @@ in "Operation."
 **Messages.** Teleport is a five-message flow between the initiator (the
 client) and the responder (the server):
 
-| Message | Direction | Fields |
-|---|---|---|
-| `teleport_init` | initiator → responder | `channel_id`; `new_funding_txo` (the new bridge's output 0); `responder_value_removal_sat` (the server-side liquidity withdrawal `X` of "Server liquidity adjustment" — the client's refresh-fee reduction falls on its own side and is not carried here) |
-| `teleport_ack` | responder → initiator | `channel_id` |
-| `teleport_complete` | initiator → responder | `channel_id` |
-| `teleport_complete_ack` | responder → initiator | `channel_id` |
-| `teleport_abort` | either | `channel_id` |
+| Type | Message | Direction | Fields |
+|---|---|---|---|
+| 82 | `teleport_init` | initiator → responder | `channel_id`; `new_funding_txo` (the new bridge's output 0); `responder_value_removal_sat` (the server-side liquidity withdrawal `X` of "Server liquidity adjustment" — the client's refresh-fee reduction falls on its own side and is not carried here) |
+| 83 | `teleport_ack` | responder → initiator | `channel_id` |
+| 84 | `teleport_abort` | either | `channel_id` |
+| 85 | `teleport_complete` | initiator → responder | `channel_id` |
+| 86 | `teleport_complete_ack` | responder → initiator | `channel_id` |
 
-The reference carries these as Lightning messages with experimental type
-numbers 82–86 (`teleport_init` 82, `teleport_ack` 83, `teleport_abort` 84,
-`teleport_complete` 85, `teleport_complete_ack` 86);
-`responder_value_removal_sat` rides as an optional TLV (type 4) defaulting
-to 0. Like the `ark_channel` feature pair, these numbers sit in unassigned
-BOLT message space and are subject to change if the protocol is ever
-standardized.
+The **Type** column gives the reference's experimental Lightning message-type
+number, and the rows are ordered by it — note that `teleport_abort` sits at 84,
+between the setup handshake and completion, because it is the flow's early exit.
+`responder_value_removal_sat` rides on `teleport_init` as an optional TLV
+(type 4) defaulting to 0. Like the `ark_channel` feature pair, these numbers sit
+in unassigned BOLT message space and are subject to change if the protocol is
+ever standardized.
 
 After `teleport_init` / `teleport_ack`, the parties exchange BOLT
 `commitment_signed` for the **new** funding scope (identified by the new funding
@@ -692,7 +692,18 @@ the initiator on receiving `teleport_complete_ack`. The channel never leaves its
 normal operating state and emits no `channel_ready`. A `teleport_abort` (or a
 disconnect before promotion) leaves the channel on its old funding outpoint; the
 flow survives reconnection via the standard `channel_reestablish`, which carries
-both funding scopes until promotion resolves.
+both funding scopes until promotion resolves. `teleport_abort` is valid from
+either side at any point **before the forfeit** — the point of no return — and a
+party MUST NOT send or honor one once it has forfeited the old VTXO (the server
+after releasing the unlock preimage, the client after receiving it), since from
+that moment the old scope is unclaimable and only the new scope is safe. An
+implementation MAY narrow the window further and accept an explicit
+`teleport_abort` only before the new-scope `commitment_signed` exchange (the
+initiator while awaiting `teleport_ack`, the responder while deciding whether to
+ack), relying on a disconnect/reconnect to unwind the dual-scope quiesced state
+that follows rather than an explicit abort; the reference does exactly this, and
+treats a `teleport_abort` arriving in any later pre-forfeit state as a protocol
+violation.
 
 **Ordering against the forfeit.** Teleport's commitment exchange — `teleport_init`
 through the new-scope `commitment_signed` — completes *before* the old channel
@@ -845,19 +856,31 @@ VTXO's exit depth, at most `max_vtxo_exit_depth`, each level confirming), the
 bridge's `exit_delta` relative timelock, and the bridge's own confirmation, plus
 fee-bumping slack. The user MUST therefore begin a force-close at least
 `max_vtxo_exit_depth + exit_delta` blocks — plus confirmation and fee-bumping
-slack for the genesis levels, the bridge, and the commitment — before
-`expiry_height`, and SHOULD refresh, which resets `expiry_height`, well before
-that: the same exit-before-expiry discipline as any VTXO (ARK #6), with the
-bridge's `exit_delta` added to the margin.
+slack for the genesis levels and the bridge — before `expiry_height`. The
+deadline is the **bridge's** confirmation: the commitment confirms only after
+the bridge and, once the bridge has spent the VTXO output, is no longer bounded
+by `expiry_height` (above), so it does not enter this margin. The user SHOULD
+refresh, which resets `expiry_height`, well before that: the same
+exit-before-expiry discipline as any VTXO (ARK #6), with the bridge's
+`exit_delta` added to the margin.
 
 This interacts with HTLCs. A refresh first quiesces the channel and settles all
 in-flight HTLCs (see "Refresh"), so an HTLC that cannot be settled — an
 unresponsive peer, a withheld preimage — **blocks the refresh** and forces a
 unilateral force-close instead. A node MUST therefore stop offering and forwarding
 HTLCs on the channel, and refresh or force-close, once `expiry_height − height`
-falls to the force-close margin above plus headroom for any on-chain HTLC
-resolution it must still drive (the `cltv_expiry_delta` budget of "The Ark channel
-type"). A channel carried too close to expiry with an unsettleable HTLC can lose
+falls to the **larger** of (a) the force-close margin above
+(`max_vtxo_exit_depth + exit_delta` + slack, which gets the bridge confirmed)
+and (b) the full on-chain HTLC-resolution budget for any HTLC it must still
+drive (the `cltv_expiry_delta` budget of "The Ark channel type",
+`2 · vtxo_exit_delta + max_vtxo_exit_depth` + margin). This is a maximum, not a
+sum: budget (b) already contains the genesis-plus-bridge climb of (a) as its
+first `vtxo_exit_delta + max_vtxo_exit_depth`, then adds the success-path CSV's
+second `vtxo_exit_delta` on the confirmed commitment — so (b) dominates whenever
+an in-flight HTLC must be resolved on-chain, while (a) governs only an idle
+channel. Adding the two would double-count the shared force-close prefix.
+
+A channel carried too close to expiry with an unsettleable HTLC can lose
 the entire VTXO to the sweep.
 
 ## Messages
