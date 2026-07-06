@@ -107,9 +107,9 @@ Beyond the VTXO trust model (ARK #0), a channel adds:
 * **Expiry is a deadline.** Like every VTXO, a channel VTXO has an
   `expiry_height` after which the server may sweep its backing funds. The user
   MUST refresh or close the channel before expiry — with enough margin to confirm
-  the bridge first, and stopping new HTLCs as the deadline nears, since an
-  unsettleable in-flight HTLC blocks a cooperative refresh (see "The refresh /
-  force-close deadline"). A channel left un-refreshed past expiry can lose its
+  the bridge first, and stopping new HTLCs as the deadline nears, since a forced
+  force-close must still resolve any in-flight HTLC on-chain in time (see "The
+  refresh / force-close deadline"). A channel left un-refreshed past expiry can lose its
   funds to the server's sweep.
 * **Liveness for cooperation.** Refresh and cooperative close require a
   responsive server; unilateral exit is always available without one.
@@ -326,7 +326,12 @@ the exit-delay CSV). The Ark-specific deviations are:
   one channel — for example the `min_final_cltv_expiry_delta` of a BOLT-11 invoice
   payable over any of its channels — MUST therefore advertise the **maximum**
   floor across the channels it could receive on, so the budget holds whichever
-  channel the payment lands on (the value is fixed when the invoice is issued).
+  channel the payment lands on (the value is fixed when the invoice is issued). A
+  payment that carries *no* receiver-committed CLTV floor — a **spontaneous
+  (keysend) payment**, which has no invoice `min_final_cltv_expiry_delta` — cannot
+  be budgeted this way at all, so a receiver MUST reject a keysend HTLC on an Ark
+  channel (the reference fails it back). Keysend is therefore **unsupported** on
+  Ark channels until a per-channel floor can be enforced for it.
   `max_vtxo_exit_depth`
   is also the upper bound the budget assumes on the **channel VTXO's own** exit
   depth — the number of genesis levels a force-close must climb: a channel VTXO is
@@ -563,10 +568,11 @@ fee cannot be refreshed and must be closed instead (offboard or force-close).
 ### Added by the channel layer: the teleport
 
 Refreshing the backing VTXO moves the channel onto a new funding outpoint. The
-Lightning layer quiesces the channel, settles in-flight HTLCs, and *teleports*
+Lightning layer quiesces the channel (no *pending* HTLC updates) and *teleports*
 the channel onto the new funding output — re-pointing the existing channel at
-the new funding outpoint rather than closing and reopening it — carrying the
-client's balance forward, less the `refresh` fee the client pays out of its own
+the new funding outpoint rather than closing and reopening it, carrying the
+client's balance (and any committed HTLCs) forward, less the `refresh` fee the
+client pays out of its own
 side (the server may additionally withdraw from its side; see "Server liquidity
 adjustment"). Teleport is an Ark-specific message flow, not a BOLT
 procedure; its messages and promotion rule are specified in "The teleport
@@ -592,7 +598,7 @@ The forfeit is the point of no return.
             server cosigns the new leaf AND the new bridge (reusing the
             channel's funding keys); finalize + verify both musig(A,S)
             signatures
- 6. [tele]  teleport: Stfu (quiesce) → settle in-flight HTLCs → TeleportInit
+ 6. [tele]  teleport: Stfu (quiesce; committed HTLCs carried) → TeleportInit
             (new_funding_txo = bridge:0, no nonces) / TeleportAck → exchange
             commitment_signed on the new funding outpoint (stock ECDSA); wait
             until the peer has accepted it (see "The teleport protocol")
@@ -617,9 +623,13 @@ machinery the refresh flow drives; an interoperable implementation MUST
 reproduce the message exchange and the promotion rule below.
 
 **Prerequisites.** Before teleport begins, the channel MUST be quiesced (BOLT-2
-`stfu`) with all in-flight HTLCs settled, the new VTXO MUST be issued and
-virtually confirmed, and its **bridge** MUST be built and cosigned (within the
-leaf cosign; see "Refresh"). The teleport itself does no `musig(A, S)` signing:
+`stfu`), which requires no *pending* (uncommitted) HTLC updates in flight. It does
+**not** require the channel to be HTLC-free: any already-*committed* HTLCs are
+carried across to the new funding scope by the teleport, exactly as a splice
+carries them (the new-scope commitment reproduces them under the continued
+commitment number; see "Commitment numbering continues across scopes"). The new
+VTXO MUST be issued and virtually confirmed, and its **bridge** MUST be built and
+cosigned (within the leaf cosign; see "Refresh"). The teleport itself does no `musig(A, S)` signing:
 the new funding output is the bridge's stock P2WSH 2-of-2, so the new-scope
 commitments are signed with the ordinary BOLT-3 funding keys (ECDSA), exactly as
 in "Operation."
@@ -864,10 +874,13 @@ refresh, which resets `expiry_height`, well before that: the same
 exit-before-expiry discipline as any VTXO (ARK #6), with the bridge's
 `exit_delta` added to the margin.
 
-This interacts with HTLCs. A refresh first quiesces the channel and settles all
-in-flight HTLCs (see "Refresh"), so an HTLC that cannot be settled — an
-unresponsive peer, a withheld preimage — **blocks the refresh** and forces a
-unilateral force-close instead. A node MUST therefore stop offering and forwarding
+This interacts with HTLCs. A refresh quiesces the channel — which needs no
+*pending* (uncommitted) HTLC updates in flight — and **carries** any committed
+HTLCs across to the new scope, like a splice (see "The teleport protocol"), so a
+committed HTLC does not by itself block the refresh. What blocks it is an
+**unresponsive peer**: both quiescence and the teleport's `commitment_signed`
+exchange need the peer, so if it stops responding near the deadline the refresh
+cannot complete and the node must force-close unilaterally instead. A node MUST therefore stop offering and forwarding
 HTLCs on the channel, and refresh or force-close, once `expiry_height − height`
 falls to the **larger** of (a) the force-close margin above
 (`max_vtxo_exit_depth + exit_delta` + slack, which gets the bridge confirmed)
@@ -880,8 +893,8 @@ second `vtxo_exit_delta` on the confirmed commitment — so (b) dominates whenev
 an in-flight HTLC must be resolved on-chain, while (a) governs only an idle
 channel. Adding the two would double-count the shared force-close prefix.
 
-A channel carried too close to expiry with an unsettleable HTLC can lose
-the entire VTXO to the sweep.
+A channel carried too close to expiry — for example one an unresponsive peer
+prevents refreshing — can lose the entire VTXO to the sweep.
 
 ## Messages
 
@@ -1044,8 +1057,9 @@ The channel work extends the protocol without disturbing existing flows.
   protection is the deadline — it MUST force-close (actualizing its balance into
   the commitment's `to_local`, claimable on its own timelock) or refresh before
   expiry. Users MUST therefore refresh well before expiry — early enough to
-  confirm the bridge first, and before an unsettleable HTLC can block the refresh
-  (see "The refresh / force-close deadline") — exactly as for any VTXO (ARK #0),
+  confirm the bridge first, and while any in-flight HTLC still has the on-chain
+  resolution budget a forced force-close needs (see "The refresh / force-close
+  deadline") — exactly as for any VTXO (ARK #0),
   with the bridge's `exit_delta` added to the margin.
 * **Virtual funding.** The channel operates as though its funding output were
   confirmed while that output — the bridge's output 0 — lives only in the
