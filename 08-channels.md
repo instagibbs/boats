@@ -550,22 +550,39 @@ request a `channel-funding` output no larger than the cap or abort the refresh;
 it MUST NOT proceed at the original amount. Absent the cap, the participation is
 accepted as usual.
 
-The client derives the split locally rather than receiving it again on a
-Lightning message: `fee` is the `refresh` fee it computes from the published
-schedule (ARK #4), and `X = (V_old − V_new) − fee` is the rest of the reduction.
-It carries `X` into the teleport as `responder_value_removal_sat` — the amount by
-which the **server's** side of the new commitment is reduced (see "The teleport
-protocol") — reduces its **own** side by `fee`, and bounds `X` by a local
-maximum, aborting if the server's cap implies a larger withdrawal than it will
-accept. The server MUST apply the same derivation when accepting the new-scope
-commitment: the client's side shrinks by exactly the `refresh` fee the server
-computes from its own schedule and the server's side by exactly `X`, with the
-new commitment spending the new bridge's funding value `V_new`; a commitment
-that shifts any of the reduction onto the other side MUST be rejected (aborting
-the teleport, a safe abort — the old channel is still intact). A refresh
-requires the fee to fit on the client's side (`fee ≤` the client's channel
-balance) and `X ≤` the server's; a channel whose client side cannot cover the
-fee cannot be refreshed and must be closed instead (offboard or force-close).
+The client derives the split locally — `fee` is the `refresh` fee it computes
+from the published schedule (ARK #4), and `X = (V_old − V_new) − fee` is the
+rest of the reduction — and declares **both halves** on `teleport_init` (see
+"The teleport protocol"): `initiator_value_removal_sat = fee`, the amount by
+which its **own** side of the new commitment is reduced, and
+`responder_value_removal_sat = X`, the amount by which the **server's** side is
+reduced. It bounds `X` by a local maximum, aborting if the server's cap implies
+a larger withdrawal than it will accept. The server MUST verify the declared
+split against the bridge it cosigned rather than trust it:
+
+* the two declared removals MUST sum to exactly `V_old − V_new`, so the new
+  commitment spends the new bridge's funding value `V_new` with the client's
+  side shrinking by exactly `initiator_value_removal_sat` and the server's by
+  exactly `responder_value_removal_sat` — the sum rule is what keeps either
+  declaration from shifting any of the reduction onto the other side; and
+* the declared `initiator_value_removal_sat` MUST be at least the `refresh` fee
+  the server computes from its own schedule. The fee bound is a floor, not
+  equality — like the round's `inputs − outputs ≥ fee` rule (ARK #4), so a
+  client computing against a slightly stale schedule overpays rather than
+  being rejected. Over-declaring is the client's own loss to take: with the
+  sum fixed, a larger `initiator_value_removal_sat` only moves reduction from
+  the server's side to the client's. The floor applies only when there is a
+  reduction to allocate (`V_old − V_new > 0`): a re-initiated teleport of a
+  scope the responder has already promoted sees no remaining reduction and
+  declares `(0, 0)` — its fee was allocated by the original exchange, and the
+  round's shortfall rule has already collected it.
+
+A `teleport_init` violating either MUST be rejected (aborting the teleport, a
+safe abort — the old channel is still intact). A refresh requires the fee to
+fit on the client's side and `X` on the server's — each side's post-removal
+balance MUST remain at or above its channel reserve — so a channel whose
+client side cannot cover the fee cannot be refreshed and must be closed
+instead (offboard or force-close).
 
 ### Added by the channel layer: the teleport
 
@@ -641,7 +658,7 @@ client) and the responder (the server):
 
 | Type | Message | Direction | Fields |
 |---|---|---|---|
-| 82 | `teleport_init` | initiator → responder | `channel_id`; `new_funding_txo` (the new bridge's output 0); `responder_value_removal_sat` (the server-side liquidity withdrawal `X` of "Server liquidity adjustment" — the client's refresh-fee reduction falls on its own side and is not carried here) |
+| 82 | `teleport_init` | initiator → responder | `channel_id`; `new_funding_txo` (the new bridge's output 0); `responder_value_removal_sat` (the server-side liquidity withdrawal `X` of "Server liquidity adjustment"); `initiator_value_removal_sat` (the client-side `refresh`-fee reduction, same section) |
 | 83 | `teleport_ack` | responder → initiator | `channel_id` |
 | 84 | `teleport_abort` | either | `channel_id` |
 | 85 | `teleport_complete` | initiator → responder | `channel_id` |
@@ -650,8 +667,10 @@ client) and the responder (the server):
 The **Type** column gives the reference's experimental Lightning message-type
 number, and the rows are ordered by it — note that `teleport_abort` sits at 84,
 between the setup handshake and completion, because it is the flow's early exit.
-`responder_value_removal_sat` rides on `teleport_init` as an optional TLV
-(type 4) defaulting to 0. Like the `ark_channel` feature pair, these numbers sit
+`responder_value_removal_sat` and `initiator_value_removal_sat` ride on
+`teleport_init` as optional TLVs (types 4 and 6) defaulting to 0; the responder
+MUST verify both against the bridge it cosigned per "Server liquidity
+adjustment". Like the `ark_channel` feature pair, these numbers sit
 in unassigned BOLT message space and are subject to change if the protocol is
 ever standardized.
 
