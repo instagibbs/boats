@@ -6,8 +6,9 @@ exited unilaterally. It builds on VTXOs and policies (ARK #2), boarding
 (ARK #3), rounds (ARK #4), emergency exit (ARK #6), and offboarding (ARK #7).
 
 The channel's payment machinery — the commitment transaction, its outputs and
-HTLCs, channel quiescence, and the channel state machine — is that of the
-Lightning Network (BOLT-3 and related), with the deviations collected in "The
+HTLCs, channel quiescence, the shutdown and closing flow, and the channel
+state machine — is that of the Lightning Network (BOLT-3 and related), with
+the deviations collected in "The
 Ark channel type" and a custom refresh transport, "The teleport protocol."
 This document specifies the *Ark side* — the VTXO and the presigned bridge
 transaction that fund the channel, and how the channel lifecycle maps onto Ark's
@@ -46,8 +47,9 @@ The lifecycle:
 * **Refresh** ("Refresh"): before expiry, a round (ARK #4) forfeits the
   channel VTXO and issues a fresh one, resetting expiry and exit depth while
   preserving the channel balance.
-* **Offboard** ("Offboard"): a cooperative close — an offboard (ARK #7)
-  forfeits the channel VTXO and pays the user's balance on-chain.
+* **Offboard** ("Offboard"): a cooperative close — the BOLT close fixes the
+  final balances, then an offboard (ARK #7) forfeits the channel VTXO and
+  pays the user's final balance on-chain.
 * **Unilateral exit / force-close** ("Unilateral exit"): the user recovers its
   funds on-chain with no server cooperation.
 
@@ -753,10 +755,15 @@ MUST precede both.
 
 ## Offboard
 
-A cooperative channel close is an offboard (ARK #7): the server pays the user's
-channel balance to an on-chain destination, and the user forfeits the channel
-VTXO to the server through the connector swap. The bridge and commitment, both
-held off-chain, are simply discarded.
+A cooperative channel close has two halves, in strict order. First the
+channel is closed at the Lightning layer by the standard BOLT-2 close —
+`shutdown`, HTLC drain, closing negotiation — which terminally fixes the
+final balances. Then the close is settled at the Ark layer by an offboard
+(ARK #7): the server pays the user's final balance to an on-chain
+destination, and the user forfeits the channel VTXO to the server through the
+connector swap. The commitment, the bridge, and the closing transaction the
+close produced are all held off-chain throughout, and discarded once the
+offboard confirms.
 
 The forfeit is the standard ARK #7 connector-bound forfeit of the channel
 VTXO — a `musig(A, S)` cosignature over a forfeit transaction that also spends
@@ -766,13 +773,94 @@ atomicity are all as in ARK #7, using the `prepare_offboard` /
 `finish_offboard` messages unchanged. The **balance rule**, however, is
 amended (below): ARK #7's exact-balance check cannot hold for a channel input.
 
-The channel layer adds (referenced) the close negotiation: the channel is
-quiesced and its settled balance read before the offboard amount is fixed.
+### The close
+
+The close is the ordinary BOLT-2 closing flow (referenced, not restated):
+either peer MAY initiate with `shutdown` — the server included, e.g. to wind
+down an idle channel, though the Ark leg that follows is always the user's to
+drive. From `shutdown` on, no new HTLC is offered while in-flight HTLCs
+resolve normally; once the channel is empty of HTLCs, closing negotiation
+(`closing_signed`, or `closing_complete` / `closing_sig` under
+`option_simple_close`; the reference uses `closing_signed`) produces a fully
+signed **closing transaction** spending the funding output. Channel
+quiescence (BOLT-2 `stfu`, the teleport's tool) plays no part: `stfu` cannot
+be sent while updates are pending, forbids the very settles a drain needs,
+does not survive disconnection, and force-disconnects after 60 seconds with
+HTLCs still committed — it freezes an *operating* channel for a moment,
+whereas `shutdown` drains a *terminating* channel monotonically, for as long
+as that takes, surviving reconnection via `channel_reestablish`
+retransmission. The freeze the offboard needs is not an extra protocol at
+all; it is the close itself.
+
+The closing transaction is negotiated exactly per BOLT-2, but its job here is
+not to be broadcast: the funding output it spends is the bridge's output,
+which exists only in the off-chain exit chain (virtual funding), so on the
+cooperative path it can never confirm, and neither side need relay it (a
+stack that broadcasts it unconditionally is harmless — the transaction spends
+an outpoint the chain has never seen). Its jobs:
+
+* **The balance agreement.** Completing the negotiation commits both peers,
+  by signature, to the same pair of final balances — a peer that disagreed
+  would produce a closing signature that fails to verify, aborting the close
+  before the Ark flow rather than surfacing inside it. The amount rule below
+  is checked against this close-fixed figure, not a live channel-state read,
+  and the figure cannot go stale: the close is terminal, so no later update
+  can move it.
+* **The user's fallback between close and payout.** Until the forfeit, the
+  user can settle the closed channel without the server: exit the VTXO
+  (ARK #6), broadcast the bridge, and spend the funding output with the
+  closing transaction in place of the commitment — the better tail, since its
+  outputs carry no `to_self_delay` and the channel is empty of HTLCs by
+  construction (the final commitment, never revoked, remains valid too). The
+  closing transaction is an ordinary v2 transaction broadcast only after the
+  bridge confirms, so TRUC's unconfirmed-ancestry rules never see it; a stale
+  negotiated fee is repaired by CPFP of the user's own output.
+* **Nothing, after the forfeit.** Once the VTXO is forfeited, the closing
+  transaction — exactly like the commitment — can no longer reach the chain:
+  the forfeit spends the channel VTXO output with no timelock, ahead of the
+  bridge's `exit_delta`, so the funding output is never actualized (the
+  argument that retires the old scope after a teleport; see "The teleport
+  protocol"). Holding a signed closing transaction therefore gives the user
+  no post-payout claim; enforcing that is the server's ordinary
+  forfeit-watch duty (ARK #7, server sweeping).
+
+Requirements:
+
+* The user MUST complete the close — hold a fully signed closing transaction
+  paying its final balance (less any closing fee it pays) — before
+  `prepare_offboard`. This is the exit-before-forfeit discipline of ARK #4:
+  the closing transaction is the exit story the user falls back on if the
+  server stops cooperating after the close.
+* The server MUST NOT cosign an offboard spending a channel VTXO whose
+  channel has not completed the close — before that point there is no fixed
+  balance to verify the payout against. It MUST retain the close outcome
+  (the final balances, keyed to the channel's backing VTXO) until the VTXO
+  is resolved — offboarded or expiry-swept — since the offboard may arrive
+  arbitrarily later, after its Lightning stack has forgotten the channel.
+* The closing fee (BOLT-2) is deducted from closing outputs only — under
+  `closing_signed` from the funder's (the user's: it opened the channel),
+  under `option_simple_close` from each closer's own. It never enters the
+  offboard payout, which is computed from the final balance (below); the
+  user SHOULD negotiate it low, since the closing transaction is broadcast
+  only in the fallback, where it can be fee-bumped at use.
+
+The close is a one-way door: `shutdown` commits the channel to closing
+(BOLT-2), and there is no abort-and-resume — unlike a refresh, whose teleport
+can abort back to normal operation. What a failure costs is bounded, though:
+an offboard that fails after the close leaves the channel closed but loses
+nothing — the balances stay fixed, `prepare_offboard` can be retried at
+leisure, and the fallback above covers an uncooperative server. What the
+close does not extend is expiry: `expiry_height` still bounds everything, so
+a user whose offboard is not completing MUST begin the fallback in time to
+confirm the bridge before expiry ("The refresh / force-close deadline"). A
+user SHOULD check its balance clears the gate below before initiating the
+close: a closed channel below the gate is recoverable only through the
+fallback, at on-chain cost.
 
 ### Amount rule
 
 A channel VTXO's `amount` is the whole channel capacity `V` — *both* sides'
-settled balances — while the offboard pays out only the user's side. ARK #7's
+final balances — while the offboard pays out only the user's side. ARK #7's
 requirement that the input amounts equal `net_amount` plus the fee *exactly*
 therefore cannot apply to a channel input; in its place:
 
@@ -780,18 +868,20 @@ therefore cannot apply to a channel input; in its place:
   input (the amended rule is per-channel; mixing inputs would make the
   balance and fee attribution ambiguous).
 * `net_amount + fee ≤ V`. The difference `V − net_amount − fee` is the
-  server's own settled channel balance: no output pays it — the server keeps
+  server's own final channel balance: no output pays it — the server keeps
   it implicitly by collecting the forfeit of the whole VTXO.
-* The server MUST verify `net_amount` against the channel's quiesced settled
-  balance — it is the channel peer, so it holds the same figure:
+* The server MUST verify `net_amount` against the user's final balance as
+  fixed by the completed close — the figure its own closing signatures
+  commit to, before any closing-fee deduction:
   `net_amount = user_balance − fee`. It MUST NOT cosign an offboard paying
   more (the excess would come out of the server's own side), and SHOULD
   reject one paying less, since the user has no way to recover the shortfall
-  once the channel is torn down. This check requires the channel to be
-  quiesced with all in-flight HTLCs settled before `prepare_offboard`: an
-  unsettled HTLC has no side to be attributed to.
+  once the VTXO is forfeited. The close subsumes the settled-HTLC
+  precondition the balance needs: closing negotiation only begins on a
+  channel empty of HTLCs (BOLT-2), so a completed close leaves no unsettled
+  HTLC to attribute.
 * `fee` is the ARK #7 offboard fee (`offboard` schedule entry) with the
-  user's settled balance as the chargeable amount for the ppm-expiry
+  user's final balance as the chargeable amount for the ppm-expiry
   component: the user pays fees on its own funds, not on the server's share.
 
 The exact-balance rule of ARK #7 is unchanged for non-channel inputs.
@@ -799,8 +889,10 @@ The exact-balance rule of ARK #7 is unchanged for non-channel inputs.
 ### Sequence
 
 ```
- 1. [BOLT]  Stfu (quiesce) → settle in-flight HTLCs → read the settled balance
- 2. [gate]  balance > 0 and (balance − fee) ≥ dust
+ 1. [BOLT]  shutdown (either peer) → no new HTLCs; in-flight HTLCs resolve →
+            closing negotiation → fully signed closing tx in hand
+            ──────── the channel is now closed; final balances fixed ────────
+ 2. [gate]  user_balance > 0 and (user_balance − fee) ≥ dust
  3. [Ark]   PrepareOffboard: destination + amount, channel VTXO id, ownership
             proof  → unsigned offboard tx + forfeit-cosign nonce
  4. [local] validate the offboard tx; sign the connector-bound forfeit of the
@@ -808,9 +900,16 @@ The exact-balance rule of ARK #7 is unchanged for non-channel inputs.
  5. [Ark]   FinishOffboard: send the forfeit signature
                                                   *** POINT OF NO RETURN ***
             → fully-signed offboard tx
- 6. [local] broadcast the offboard tx → client paid on-chain; tear the channel
-            down once the offboard tx confirms (not before)
+ 6. [local] broadcast the offboard tx → client paid on-chain; retain the
+            genesis chain, bridge, and closing tx until it confirms to the
+            required depth (the fallback, until the payout is final)
 ```
+
+A failure at steps 3–5 leaves a closed channel and an unresolved VTXO: retry
+the offboard, or fall back to the unilateral exit ("The close", above). Step
+5 is the point of no return exactly as in ARK #7 — from `finish_offboard` the
+user MUST consider the VTXO spent, and its payout protection is the
+connector binding.
 
 ## Unilateral exit / force-close
 
@@ -833,7 +932,10 @@ force-close (BOLT) then spends it.
 3. **Force-close.** Broadcast the latest commitment transaction, which spends the
    now-on-chain funding output through the stock BOLT-3 2-of-2 (ECDSA). The
    commitment carries no extra delay of its own — the exit delay was already
-   served on the bridge input — so it confirms once the bridge does.
+   served on the bridge input — so it confirms once the bridge does. (After a
+   completed cooperative close whose offboard never resolved, spend the
+   funding output with the closing transaction instead — no `to_self_delay`,
+   no HTLCs; see "Offboard".)
 4. **Claim.** Once the commitment confirms, claim its outputs (`to_local`,
    `to_remote`, and resolved HTLCs) per the Ark channel type's BOLT-3 rules
    (referenced).
@@ -1044,7 +1146,8 @@ The channel work extends the protocol without disturbing existing flows.
 
 * **Exit guarantee preserved.** A channel VTXO carries a complete, cosigned
   genesis exit chain like any VTXO (ARK #2, ARK #6); together with the bridge and
-  commitment transaction it always lets the user recover its channel balance
+  the commitment transaction (or the closing transaction, after a cooperative
+  close) it always lets the user recover its channel balance
   on-chain without the server. The server cannot steal from a user who exits
   and force-closes in time.
 * **Atomic give-up.** Because a channel VTXO is forfeited by the standard
