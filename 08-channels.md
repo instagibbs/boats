@@ -880,8 +880,9 @@ HTLCs across to the new scope, like a splice (see "The teleport protocol"), so a
 committed HTLC does not by itself block the refresh. What blocks it is an
 **unresponsive peer**: both quiescence and the teleport's `commitment_signed`
 exchange need the peer, so if it stops responding near the deadline the refresh
-cannot complete and the node must force-close unilaterally instead. A node MUST therefore stop offering and forwarding
-HTLCs on the channel, and refresh or force-close, once `expiry_height − height`
+cannot complete and the node must force-close unilaterally instead. The user
+MUST therefore stop offering new HTLCs on the channel, and refresh or
+force-close, once `expiry_height − height`
 falls to the **larger** of (a) the force-close margin above
 (`max_vtxo_exit_depth + exit_delta` + slack, which gets the bridge confirmed)
 and (b) the full on-chain HTLC-resolution budget for any HTLC it must still
@@ -894,7 +895,12 @@ an in-flight HTLC must be resolved on-chain, while (a) governs only an idle
 channel. Adding the two would double-count the shared force-close prefix.
 
 A channel carried too close to expiry — for example one an unresponsive peer
-prevents refreshing — can lose the entire VTXO to the sweep.
+prevents refreshing — can lose the entire VTXO to the sweep. This deadline is
+the user's own discipline, not a forwarding restriction on the server: the
+server's expiry-sweep leaf *gains* the whole channel on a missed deadline (see
+"Security and trust notes"), so it has no aligned incentive to stop forwarding
+HTLCs onto a channel nearing expiry. The user cannot rely on it and MUST protect
+itself by refreshing in time.
 
 ## Messages
 
