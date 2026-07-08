@@ -658,21 +658,26 @@ client) and the responder (the server):
 
 | Type | Message | Direction | Fields |
 |---|---|---|---|
-| 82 | `teleport_init` | initiator → responder | `channel_id`; `new_funding_txo` (the new bridge's output 0); `responder_value_removal_sat` (the server-side liquidity withdrawal `X` of "Server liquidity adjustment"); `initiator_value_removal_sat` (the client-side `refresh`-fee reduction, same section) |
-| 83 | `teleport_ack` | responder → initiator | `channel_id` |
-| 84 | `teleport_abort` | either | `channel_id` |
-| 85 | `teleport_complete` | initiator → responder | `channel_id` |
-| 86 | `teleport_complete_ack` | responder → initiator | `channel_id` |
+| 32850 | `teleport_init` | initiator → responder | `channel_id`; `new_funding_txo` (the new bridge's output 0); `responder_value_removal_sat` (the server-side liquidity withdrawal `X` of "Server liquidity adjustment"); `initiator_value_removal_sat` (the client-side `refresh`-fee reduction, same section) |
+| 32851 | `teleport_ack` | responder → initiator | `channel_id` |
+| 32852 | `teleport_abort` | either | `channel_id` |
+| 32853 | `teleport_complete` | initiator → responder | `channel_id` |
+| 32854 | `teleport_complete_ack` | responder → initiator | `channel_id` |
 
-The **Type** column gives the reference's experimental Lightning message-type
-number, and the rows are ordered by it — note that `teleport_abort` sits at 84,
-between the setup handshake and completion, because it is the flow's early exit.
+The **Type** column gives the reference's Lightning message-type number, and
+the rows are ordered by it — note that `teleport_abort` sits between the setup
+handshake and completion because it is the flow's early exit. The numbers live
+in BOLT #1's custom-message range (≥ 32768, where protocol extensions belong)
+rather than low unassigned space, which the splicing standardization is
+actively (re)assigning; BOLT #1's odd/even rule still applies there, and the
+parity is deliberate — an even `teleport_init`, `teleport_abort`, or
+`teleport_complete_ack` reaching a peer that does not know the protocol fails
+the connection outright rather than being silently dropped.
 `responder_value_removal_sat` and `initiator_value_removal_sat` ride on
 `teleport_init` as optional TLVs (types 4 and 6) defaulting to 0; the responder
 MUST verify both against the bridge it cosigned per "Server liquidity
-adjustment". Like the `ark_channel` feature pair, these numbers sit
-in unassigned BOLT message space and are subject to change if the protocol is
-ever standardized.
+adjustment". Like the `ark_channel` feature pair, the numbers are subject to
+change if the protocol is ever standardized.
 
 After `teleport_init` / `teleport_ack`, the parties exchange BOLT
 `commitment_signed` for the **new** funding scope (identified by the new funding
