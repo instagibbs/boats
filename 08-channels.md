@@ -352,9 +352,21 @@ thereafter a fixed parameter of the channel. Both parties MUST store it (with th
 channel's other parameters, keyed by `channel_id`) and use the stored value for
 every later commitment and for the bridge of every refresh; neither re-reads
 `vtxo_exit_delta` from ark info for an existing channel. No wire field carries
-it — the value is pinned by construction, since the board cosign fixes it on the
-bridge input and the initial commitment exchange fixes it in the HTLC scripts, and
-a disagreement makes those signatures fail to verify and aborts the open. A
+it. Cross-peer agreement is enforced at open by the **bridge cosign**: the
+`musig(A, S)` key-path sighash commits the bridge input's `nSequence`, so peers
+holding different values fail to verify each other's partial signatures and the
+open aborts with nothing on-chain. The **HTLC success-path CSV is not what
+catches a disagreement**: the initial commitment carries no HTLC outputs, so
+nothing signed at establishment commits to the success CSV, and a divergence
+confined to it — one peer's success CSV drifting from its own bridge
+`nSequence` — stays hidden through a successful open and surfaces only at the
+first HTLC's commitment exchange, whose signatures fail to validate and
+force-close an established channel *after* the board transaction confirmed
+(the point of no return). An implementation MUST therefore derive the success
+CSV and the bridge `nSequence` from the single pinned value rather than
+configuring them independently: the protocol re-verifies the bridge copy at
+every cosign, but a split between a peer's own two copies is caught by nothing
+until that first-HTLC force-close. A
 refresh MUST build the new bridge at the pinned value, and the server,
 reconstructing that bridge from `channel_id`, MUST use the channel's stored
 `exit_delta` rather than its current ark-info value; if the server's
