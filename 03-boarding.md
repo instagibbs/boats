@@ -92,7 +92,18 @@ Requirements (server):
   set.
 * MUST validate `expiry_height` against its accepted range: no lower than
   the current chain tip and no higher than the tip plus `vtxo_expiry_delta`
-  (plus a small buffer for tip skew; the reference allows 3 blocks).
+  plus a bounded tip-skew allowance (the reference allows 3 blocks). This upper
+  bound is mandatory for **every** board variant, including an ARK #8 channel
+  board; a board request does not grant a client discretion to choose an
+  arbitrarily long expiry. Before expiry, the protocol guarantees the server no
+  unilateral resolution path: the client holds the completed exit and may simply
+  stop participating. A far-future expiry would therefore let an absent client
+  leave the board unresolved for an arbitrarily long time. For a plain board the
+  principal is user-funded, so this is primarily a bound on unresolved protocol
+  state and server recourse; for a channel board it can additionally lock any
+  balance the server later earns in the channel (ARK #8). An implementation that
+  separately retains a complete unilateral channel exit may have an earlier
+  recovery optimization, but that is not protocol-guaranteed protection.
 * MUST respond with a `board_cosign_response` produced first-signer one-shot
   (ARK #0): a fresh nonce seeded with the exit sighash and an immediate
   partial signature, the secret nonce never stored, so that repeated
