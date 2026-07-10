@@ -379,8 +379,12 @@ accept a `channel-funding` request here and MUST reject one on the interactive
 `submit_payment`. For a `channel-funding` request the server MUST additionally
 verify that `input_vtxos` include the current backing VTXO of one of its
 channels, rejecting **at participation time** (not deferring to the later leaf
-cosign) otherwise (ARK #8, "Refresh"). HTLC policies are not valid round
-outputs, and each requested amount MUST be at least `P2TR_DUST` (and at most
+cosign) otherwise. Accepting such a participation also establishes the
+channel's exact `(unlock_hash, channel_id, old_backing_vtxo_id)` refresh gate —
+one admission decision, never one without the other; ARK #8 "Refresh admission
+and the server gate" defines the binding, single-use, and recovery
+requirements. HTLC policies are not valid round outputs,
+and each requested amount MUST be at least `P2TR_DUST` (and at most
 `max_vtxo_amount` if set).
 
 ### `round_participation_status`
