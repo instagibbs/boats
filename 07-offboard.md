@@ -22,9 +22,9 @@ without hash locks or round participation.
 3. The user validates the transaction, signs one **forfeit transaction** per
    input (each spending that input VTXO *and* a connector), and returns its
    nonces and partial signatures.
-4. The server verifies the forfeit signatures, completes them, then signs
-   and broadcasts the offboard transaction and returns the signed
-   transaction to the user.
+4. The server verifies and completes the forfeit signatures, records the
+   completed outcome (see `finish_offboard`), then broadcasts and returns
+   the signed transaction to the user.
 5. The user verifies the signed transaction has the same txid it forfeited
    against, and broadcasts it as well.
 
@@ -214,20 +214,58 @@ Response:
 |---|---|
 | `signed_offboard_tx` | the fully signed offboard transaction |
 
-`finish_offboard` consumes the pending offboard state: the server answers
-it at most once per prepared offboard, and pending state expires after a
-timeout. A failed attempt requires restarting from `prepare_offboard`.
+`finish_offboard` is idempotent by `offboard_txid`. The server MUST serialize
+processing for a prepared session: exactly one request may consume its MuSig2
+secret nonces, and a concurrent request receives an explicit *in progress*
+result rather than being mistaken for an unknown session. This prevents using
+one server nonce in two signing sessions. A completed retry does not sign
+again; it returns the already stored outcome below.
+
+A `finish_offboard` the server has answered with success — or whose offboard
+transaction it has broadcast — is **completed**, and completion survives
+restarts: a byte-identical retry MUST return the same `signed_offboard_tx`,
+however much later it arrives, and a broadcast or wallet failure is retried
+from the completed outcome, never by preparing a new offboard. The server MUST
+retain the outcome — the signed offboard transaction, the connector-bound
+forfeits, and the input set — until the input VTXOs and payout are resolved.
+(In practice: the outcome commits before the server broadcasts, replies, or
+discards session state.) A prepared session with no completed outcome and no
+request in progress MAY expire after a timeout.
+
+*Completed* and *not accepted* are mutually exclusive, and remain so across
+restarts. A finish attempt that fails before completing MUST leave the server
+with no actionable forfeit from that attempt. Once no request is in progress,
+the server MAY answer an unknown `offboard_txid` with an authenticated,
+definitive **not accepted** result — distinct from a transport error and from
+*in progress* — which asserts that the finish never completed and no forfeit
+from it will ever be used, so the client may discard that finish intent and
+return to `Prepared`. A server MUST NOT be able to reach a state in which it
+emits *not accepted* for an offboard it in fact completed.
 
 Requirements (user):
 
+* From its first attempt to send `finish_offboard`, and across any crash or
+  restart, the user MUST remain able to replay that exact request (same
+  `offboard_txid`, nonces, and partial signatures) and to recognize its payout.
+  Once sending may have occurred, a missing response is an **unknown
+  outcome**, not a failed offboard: the user MUST replay only that
+  byte-identical request and monitor the known `offboard_txid`. It MUST NOT
+  start a new `prepare_offboard` for those inputs or attempt another spend of
+  them.
+* The sole exception is an authenticated, definitive *not accepted* result as
+  defined above. Only that result permits the user to clear the finish intent
+  and return to `Prepared`; timeout, disconnection, or an unknown transport
+  outcome does not.
 * MUST verify the signed transaction's txid equals the txid it forfeited
   against; a different txid would invalidate the connector-bound forfeits
   while still spending nothing of the user's — but the user MUST NOT treat
   the offboard as complete in that case.
 * SHOULD broadcast the signed transaction itself and verify its own mempool
   accepts it (protecting against a server double-spending its inputs).
-* MUST consider the input VTXOs spent from the moment it sends
-  `finish_offboard`.
+* MUST consider the input VTXOs spent from the moment its finish intent is
+  eligible to be sent. Before that transition, an abandoned prepared session
+  has sent no forfeit and the user may safely choose another offboard or a
+  unilateral exit.
 * SHOULD track the transaction to its required confirmation depth before
   considering the offboard final.
 
