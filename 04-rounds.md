@@ -227,6 +227,12 @@ The VTXO for leaf `i` has:
 Such a VTXO validates structurally ("validate unsigned") but is not complete
 until the leaf cosignature and unlock preimage are added (below).
 
+A `channel-funding` leaf (the channel-refresh flow, ARK #8) is built
+identically: only the leaf transaction's output policy differs. The
+leaf-cosign taproot still uses the leaf's `user_pubkey` (`A`) — the user's
+cooperative key, exactly as for any other policy — and the final genesis item is
+the same `hash-locked-cosigned` transition.
+
 ## Messages
 
 ### Round events
@@ -289,9 +295,11 @@ Requirements (server):
   the same input VTXO more than once.
 * MUST verify the input/output balance covers the refresh fee:
   `inputs − outputs ≥ fee`, with `fee` per the Fee rule above.
-* MUST verify each requested policy is a `pubkey` policy (HTLC policies are
-  not valid round outputs) and each amount is at least `P2TR_DUST` (and at
-  most `max_vtxo_amount` if set).
+* MUST verify each requested policy is a `pubkey` policy — or a
+  `channel-funding` policy, accepted only in a *delegated* channel-refresh
+  participation (ARK #8), never in an interactive `submit_payment`; HTLC
+  policies are not valid round outputs — and each amount is at least
+  `P2TR_DUST` (and at most `max_vtxo_amount` if set).
 * MUST reject a `cosign_pubkey` already registered by another request in the
   same attempt (cosign pubkeys MUST be unique within a round), and MUST
   accept at most one `provide_vtxo_signatures` per cosign pubkey.
@@ -362,6 +370,22 @@ Response: `unlock_hash`. The server queues the participation for a following
 round and signs the tree on the participant's behalf: the resulting leaves
 carry no `cosign_pubkey` (absent in the leaf spec), so only the global
 cosign key signs their branches.
+
+Requirements (server): the policy-type, dust, and `max_vtxo_amount` admission
+checks listed for `submit_payment` above apply here too — they are not specific
+to the interactive path. In particular, this delegated path is the **only** one
+in which a `channel-funding` output policy is admitted (ARK #8): the server MUST
+accept a `channel-funding` request here and MUST reject one on the interactive
+`submit_payment`. For a `channel-funding` request the server MUST additionally
+verify that `input_vtxos` include the current backing VTXO of one of its
+channels, rejecting **at participation time** (not deferring to the later leaf
+cosign) otherwise. Accepting such a participation also establishes the
+channel's exact `(unlock_hash, channel_id, old_backing_vtxo_id)` refresh gate —
+one admission decision, never one without the other; ARK #8 "Refresh admission
+and the server gate" defines the binding, single-use, and recovery
+requirements. HTLC policies are not valid round outputs,
+and each requested amount MUST be at least `P2TR_DUST` (and at most
+`max_vtxo_amount` if set).
 
 ### `round_participation_status`
 

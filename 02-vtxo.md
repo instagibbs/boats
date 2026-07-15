@@ -100,11 +100,14 @@ construction parameterized by `(server_pubkey, exit_delta, expiry_height)`.
 
 ### User-facing policies
 
-These may appear as the `policy` of a user's VTXO and in VTXO requests. Of
-them, only `pubkey` is accepted as a round (signed-tree) output and as an
-arkoor-spendable input (ARK #4, ARK #5); the HTLC policies arise only in the
-Lightning send/receive flows (out of scope for this series) and are neither
-valid round outputs nor arkoor inputs.
+These may appear as the `policy` of a user's VTXO and in VTXO requests.
+`pubkey` is the general-purpose policy: it is accepted as a round
+(signed-tree) output and as an arkoor-spendable input (ARK #4, ARK #5).
+`channel-funding` (the backing VTXO of a Lightning channel, ARK #8) is accepted
+as a round output only in the channel-refresh flow and is not
+arkoor-spendable. The HTLC policies arise only in the Lightning send/receive
+flows (out of scope for this series) and are neither valid round outputs nor
+arkoor inputs.
 
 #### `pubkey` (type byte `0x00`)
 
@@ -139,6 +142,37 @@ Fields: `user_pubkey` (33) ‖ `payment_hash` (32) ‖ `htlc_expiry` (u32) ‖
 * leaf 2: hash-delay-sign `(payment_hash, htlc_expiry_delta + exit_delta, A)`
   — user claims with the preimage; the longer delay gives the server time to
   use its expiry path if the user exits too late
+
+#### `channel-funding` (type byte `0x08`)
+
+The backing output of a Lightning-channel VTXO (ARK #8). It is *not* the
+channel's funding outpoint: the funds reach the Lightning commitment through a
+presigned **bridge transaction** (ARK #8) that spends this output, and a channel
+VTXO is actualized only through that bridge — never through a VTXO-level claim.
+
+Fields: `user_pubkey` (33).
+
+The cooperative key is `musig(A, S)`, where `A` is this `user_pubkey` and `S` is
+the VTXO's `server_pubkey`. As with every other user-facing policy, `S` is taken
+from the VTXO's `server_pubkey` rather than stored in the policy, and `A` is the
+user's cooperative key exactly as in `pubkey` — *not* a channel funding key (the
+channel's BOLT-3 funding keys are ordinary Lightning keys, unrelated to `A`/`S`;
+ARK #8).
+
+* internal key: `musig(user_pubkey, server_pubkey)` — the cooperative 2-of-2;
+  this is both the path the off-chain **bridge transaction** spends and the path
+  used to forfeit, refresh, or offboard the VTXO
+* leaf: timelock-sign `(expiry_height, S)` — the server sweeps after expiry, when
+  the VTXO's tree is left to time out
+
+This is the **cosign taproot** `(musig(A, S), S, expiry_height)` (see "Shared
+taproot constructions") — the same construction as a board funding output, with
+`A` = `user_pubkey`. It differs from `pubkey` in its leaf set: the user's
+`delayed-sign(exit_delta, A)` unilateral-exit leaf is dropped — a channel VTXO's
+unilateral-exit delay rides on the bridge transaction's input `nSequence`
+(ARK #8), not on a VTXO leaf — and the server's expiry leaf, which `pubkey` does
+not carry, is added, giving the server its post-expiry recourse over an output
+that would otherwise have no unilateral spending path at all.
 
 ### Server-internal policies
 
