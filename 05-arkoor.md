@@ -189,8 +189,11 @@ Requirements (server):
   same txids, so no conflicting spend can result. A byte-identical duplicate
   is not a retry but a transport retransmission within the same signing
   session — a conforming retry always carries fresh nonces, so it is never
-  byte-identical; a server MAY answer such a duplicate by replaying its
-  stored response verbatim, and a sender MUST NOT rely on that replay.
+  byte-identical. A server MUST NOT open a fresh signing session for a
+  byte-identical duplicate — pairing the sender's already-used public nonces
+  with new server nonces is precisely the cross-session nonce reuse the
+  retry rule exists to prevent — it MUST either replay its stored response
+  verbatim or reject the duplicate; a sender MUST NOT rely on replay.
 
 ### `arkoor_cosign_response`
 

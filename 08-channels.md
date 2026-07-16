@@ -1496,7 +1496,7 @@ the user to the server:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `amount` | u64 sats | value of the channel VTXO output (gross, before fee) |
+| `amount` | u64 sats | the gross board amount (ARK #3); the channel VTXO output's value — and hence the funding output's — is this **net of the board fee** |
 | `utxo` | outpoint | the on-chain board outpoint |
 | `expiry_height` | u32 | chosen expiry height |
 | `user_pubkey` | pubkey | `A` |
