@@ -176,7 +176,19 @@ Requirements (server):
   cosignature per sighash, produced first-signer one-shot (ARK #0).
 * MUST persist the input VTXO as spent *before* signing (signing twice over
   the same input with different outputs is theft-enabling; see Security
-  notes); retries of the identical request are answered idempotently.
+  notes). The spent-mark records the part's **operation identity** — the
+  input, the ordered normal and isolated destination lists, and
+  `use_checkpoint` (plus any extension fields, e.g. ARK #8's `channel_id`); a
+  package's identity is the ordered list of its parts'. Retries are judged
+  against that identity, not against request bytes: a request for a spent
+  input whose identity matches MUST be answered with a **fresh signing
+  session** over the same reconstructed transactions — fresh server nonces
+  and partials, against the fresh sender nonces of the retry (below) — and
+  one whose identity differs MUST be rejected. Re-signing the identical
+  transactions under fresh nonces yields only additional signatures over the
+  same txids, so no conflicting spend can result. A server MAY answer a
+  byte-identical retry by replaying its stored response verbatim (the
+  degenerate safe case); a sender MUST NOT rely on replay.
 
 ### `arkoor_cosign_response`
 
@@ -192,6 +204,13 @@ Requirements (sender):
 * MUST verify every server partial signature (BIP-327 partial verification
   against the corresponding sighash, tweak, and nonces) before producing its
   own partial signatures.
+* On any retry — a lost, timed-out, or unverifiable response — MUST discard
+  the session's secret nonces and generate fresh ones: a secret nonce never
+  participates in more than one signing session (the nonce discipline of
+  ARK #4 failure handling). The operation-identity rule above is what makes
+  the retry answerable: the server re-signs the same transactions in a fresh
+  session, so a sender that has lost its secret nonces mid-exchange recovers
+  by the same path.
 * Completes each final signature, embeds them in the new VTXOs' genesis
   items, and delivers the new VTXOs to the recipients (delivery — e.g. the
   mailbox protocol — is out of scope for this document).

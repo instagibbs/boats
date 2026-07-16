@@ -696,9 +696,17 @@ Concretely — each an observable property that MUST survive a crash:
   the trigger. Until then the channel MUST NOT operate — which is exactly
   what keeps the pre-registration race harmless: the server's balance is
   still zero, so an aborting user can only reclaim its own funds.
-* The server MUST retain those transactions for the life of the scope and
-  MUST watch for any prefix of the input's exit chain confirming; on seeing
-  it, it MUST broadcast the retained transaction(s), fee-bumped via the P2A
+* The server MUST retain those transactions, and MUST watch for any prefix
+  of the input's exit chain confirming, for as long as the input's
+  delayed-exit leaf is live: not merely for the scope's life, but until the
+  input VTXO's output is conclusively spent on-chain (by the retained
+  transfer, by a forfeit-driven actualization, or by the expiry sweep). A
+  refresh or offboard does **not** end the duty — after the forfeit, the
+  forfeited upgrade output can be actualized for the forfeit claim only
+  through these same transactions, so discarding them at forfeit would let
+  the input's leaf outrace the forfeit and take the value backing the
+  replacement scope or payout. On seeing the input's chain confirm, the
+  server MUST broadcast the retained transaction(s), fee-bumped via the P2A
   anchor, ahead of the input's `exit_delta` window. This duty is the
   forfeit-watch pattern (ARK #4, ARK #7) applied to an open — and it is
   load-bearing for the channel balance.
@@ -1602,9 +1610,16 @@ partial-signature verification, before completing anything.
 Requirements (server): the ARK #5 requirements apply, and additionally —
 
 * When `channel_id` is present, the named channel MUST be one the server is
-  opening — funding keys exchanged, no funding outpoint yet assigned — exactly
-  as in the board variant; if it names no such channel, the server MUST NOT
-  cosign any part of the package.
+  opening: funding keys exchanged, not yet operating (no prior funding
+  registered, `ChannelReady` never sent), and its Lightning establishment run
+  against exactly the outpoint this cosign produces — the channel's assigned
+  funding outpoint MUST equal the reconstructed transfer's `bridge_txid:0`.
+  (The upgrade exchanges the initial commitment *before* the cosign, so
+  unlike the board variant an assigned funding outpoint is **required** here,
+  not forbidden; the equality check is what prevents a cosign from being
+  redirected at an already-funded channel.) If `channel_id` names no such
+  channel, or the assigned outpoint differs, the server MUST NOT cosign any
+  part of the package.
 * The server MUST NOT cosign a `channel-funding` destination except together
   with its bridge in the same exchange — the no-bridgeless-VTXO rule of the
   board cosign. Equivalently: a request with a `channel-funding` destination
@@ -1618,8 +1633,13 @@ Requirements (server): the ARK #5 requirements apply, and additionally —
   ("Open by upgrade"); every other shape follows its ordinary checkpoint
   policy (ARK #5).
 
-Nonce freshness is as in the board cosign: on any retry the user MUST generate
-fresh secret nonces for every slot, the bridge's included.
+Retries follow ARK #5's operation-identity rule, with the channel fields
+inside it: `channel_id` joins the part's operation identity, and in a
+re-signed session the bridge slot gets fresh nonces and a fresh partial
+exactly like the transfer slots. As everywhere (ARK #4 failure handling, the
+board cosign), the user MUST discard and regenerate its secret nonces for
+every slot — the bridge's included — on any retry; a secret nonce never
+participates in more than one signing session.
 
 ### `submit_round_participation` response (ARK #4)
 
@@ -1653,8 +1673,12 @@ The channel work extends the protocol without disturbing existing flows.
   output, and no bridge cosignature is returned — and the open fails safely, since
   the board transaction is never broadcast without a valid exit and bridge. It
   does not silently produce a non-channel VTXO. An upgrade fails even earlier
-  against an older server: the `channel-funding` destination policy itself is
-  rejected as an unknown policy type (ARK #2), before anything is marked spent.
+  against a channel-unaware server: the `channel-funding` destination policy
+  itself is rejected as an unknown policy type (ARK #2), before anything is
+  marked spent. (A channel-aware server that predates the upgrade variant is
+  already bound by the no-bridgeless rule — a `channel-funding` output is
+  never cosigned without its bridge — so it rejects the destination rather
+  than half-accepting it.)
   A server
   advertises channel support with the `supports_channels` flag in ark info
   (ARK #0); a client MUST NOT attempt a channel open against a server that does
@@ -1680,8 +1704,10 @@ The channel work extends the protocol without disturbing existing flows.
   delayed-exit leaf alive in the old chain. The server's defense — broadcasting
   the registered transfer, which spends the input by key path with no delay —
   is why `ChannelReady` gates on ARK #5 registration, and why the retained
-  chain and the watch duty must survive restarts ("Open by upgrade",
-  registration and the parent-exit response). It is the forfeit-watch pattern
+  chain and the watch duty must survive restarts *and outlive the scope* —
+  the duty ends only when the input's output is conclusively spent or swept,
+  not at forfeit ("Open by upgrade", registration and the parent-exit
+  response). It is the forfeit-watch pattern
   applied to an open, and load-bearing for the channel balance.
 * **An upgrade adds no arkoor trust.** Only the holder can request spends of
   its own input, so a self-spend introduces no double-sign surface of its own;
