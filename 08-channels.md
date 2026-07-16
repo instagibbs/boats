@@ -199,7 +199,8 @@ transaction (ARK #6): `nVersion = 3` (TRUC), `nLockTime = 0`, 0-fee.
   the channel, and is not a live ark-info value.
 * **Output 0 (funding):** a stock segwit-v0 **P2WSH 2-of-2** of the channel's two
   BOLT-3 funding pubkeys (Actors and keys), value = the channel VTXO's value
-  (0-fee). This is an ordinary BOLT-3 funding output — it carries *no* Ark sweep
+  (0-fee), which the open cosigns verify equals the channel's negotiated
+  funding amount (see "Messages"). This is an ordinary BOLT-3 funding output — it carries *no* Ark sweep
   script: the server's expiry recourse is one hop up, on the VTXO output, and LDK
   sweeps this output with its own transactions, which have no custom-input support
   for an Ark clause. The commitment transaction spends it.
@@ -597,7 +598,9 @@ two; every other shape follows the server's ordinary checkpoint policy
 (ARK #5). The `channel-funding` destination's `user_pubkey` MUST equal the
 input VTXO's user key: the requester is at once the arkoor sender and the
 channel user, which is what lets a single request carry both the transfer
-nonces and the bridge nonce. The new VTXO inherits the input's
+nonces and the bridge nonce. Its amount MUST equal the channel's negotiated
+funding amount — the bridge's funding output carries exactly this value, and
+the cosign verifies the equality ("Messages"). The new VTXO inherits the input's
 `expiry_height`, `server_pubkey`, `exit_delta`, and `anchor_point` (ARK #5);
 the upgrade resets nothing — the next channel refresh does, as it would anyway.
 There is no fee: an upgrade commits no new server capital and inherits the
@@ -688,7 +691,10 @@ input output directly — bypassing the transfer and taking back capacity that
 now backs the channel, including any balance the server has since earned in
 it. The server's defense is the transfer itself: the registered
 checkpoint/arkoor transactions spend the input output by key path with
-`nSequence = 0`, so broadcasting them always beats the leaf's delay.
+`nSequence = 0`, so once the input output confirms they are mineable the
+next block — `exit_delta − 1` blocks ahead of the leaf's claim (the response
+window of ARK #0; a degenerate `exit_delta` shrinks the lead toward a pure
+fee race, which bounds `vtxo_exit_delta` itself, not this flow).
 Concretely — each an observable property that MUST survive a crash:
 
 * The server MUST NOT send `ChannelReady` before it durably holds the fully
@@ -700,7 +706,10 @@ Concretely — each an observable property that MUST survive a crash:
   of the input's exit chain confirming, for as long as the input's
   delayed-exit leaf is live: not merely for the scope's life, but until the
   input VTXO's output is conclusively spent on-chain (by the retained
-  transfer, by a forfeit-driven actualization, or by the expiry sweep). A
+  transfer or a forfeit-driven actualization), or a confirmed expiry sweep
+  of one of its ancestors has made its creation impossible — a `pubkey`
+  output carries no expiry leaf of its own (ARK #2); the sweep recourse
+  lives on its cosign-taproot ancestors. A
   refresh or offboard does **not** end the duty — after the forfeit, the
   forfeited upgrade output can be actualized for the forfeit claim only
   through these same transactions, so discarding them at forfeit would let
@@ -1525,7 +1534,16 @@ Requirements (server): the ARK #3 board requirements apply, and additionally —
   controls), it MUST NOT cosign; absent `channel_id` it is a plain `pubkey` board
   (ARK #3). The named channel MUST be one the server is opening — funding keys
   exchanged, no funding outpoint yet assigned — so a board cosign cannot be
-  redirected at an already-funded channel. No pinning check is otherwise needed: a
+  redirected at an already-funded channel. The reconstructed bridge's output 0
+  MUST equal the channel's negotiated funding output: value equal to the
+  negotiated funding amount (`open_channel.funding_satoshis` — equivalently,
+  the channel VTXO's value MUST equal it), script the P2WSH 2-of-2 of the
+  stored funding keys. The cosignature check cannot catch a violation — both
+  parties' bridges agree — while the Lightning stacks sign every commitment
+  over the negotiated amount (BIP-143 commits the input value), so a mismatch
+  yields commitments unusable against the real funding output: an unexitable
+  channel and, once the bridge confirms, funds stranded in a 2-of-2 no expiry
+  leaf reaches. Otherwise no pinning check is needed: a
   client that built a different leaf or bridge would simply see the cosignature
   fail to verify (as with the board fee, ARK #3).
 * The server MUST NOT cosign a `channel-funding` output except together with
@@ -1612,14 +1630,24 @@ Requirements (server): the ARK #5 requirements apply, and additionally —
 * When `channel_id` is present, the named channel MUST be one the server is
   opening: funding keys exchanged, not yet operating (no prior funding
   registered, `ChannelReady` never sent), and its Lightning establishment run
-  against exactly the outpoint this cosign produces — the channel's assigned
-  funding outpoint MUST equal the reconstructed transfer's `bridge_txid:0`.
-  (The upgrade exchanges the initial commitment *before* the cosign, so
-  unlike the board variant an assigned funding outpoint is **required** here,
-  not forbidden; the equality check is what prevents a cosign from being
-  redirected at an already-funded channel.) If `channel_id` names no such
-  channel, or the assigned outpoint differs, the server MUST NOT cosign any
-  part of the package.
+  against exactly the funding output this cosign produces. Two equalities
+  bind that: the channel's assigned funding outpoint MUST equal the
+  reconstructed transfer's `bridge_txid:0`, and the reconstructed bridge's
+  output 0 MUST equal the channel's negotiated funding output — value equal
+  to the negotiated funding amount (equivalently: the `channel-funding`
+  destination's amount MUST equal `open_channel.funding_satoshis`), script
+  the P2WSH 2-of-2 of the stored funding keys. The outpoint alone does not
+  bind the amount: the txid commits the bridge's value, but nothing ties the
+  *negotiated* amount to it, and the Lightning stacks sign every commitment
+  over the negotiated amount (BIP-143 commits the input value) — a mismatch
+  yields commitments unusable against the real output, an unexitable
+  channel, and, once the bridge confirms, funds stranded in a 2-of-2 no
+  expiry leaf reaches. (The upgrade exchanges the initial commitment
+  *before* the cosign, so unlike the board variant an assigned funding
+  outpoint is **required** here, not forbidden; these equalities are what
+  prevent a cosign from being redirected at an already-funded channel.) If
+  `channel_id` names no such channel, or either equality fails, the server
+  MUST NOT cosign any part of the package.
 * The server MUST NOT cosign a `channel-funding` destination except together
   with its bridge in the same exchange — the no-bridgeless-VTXO rule of the
   board cosign. Equivalently: a request with a `channel-funding` destination
@@ -1675,10 +1703,10 @@ The channel work extends the protocol without disturbing existing flows.
   does not silently produce a non-channel VTXO. An upgrade fails even earlier
   against a channel-unaware server: the `channel-funding` destination policy
   itself is rejected as an unknown policy type (ARK #2), before anything is
-  marked spent. (A channel-aware server that predates the upgrade variant is
-  already bound by the no-bridgeless rule — a `channel-funding` output is
-  never cosigned without its bridge — so it rejects the destination rather
-  than half-accepting it.)
+  marked spent. (Compatibility is defined against channel-unaware peers
+  only; intermediate revisions of this document are not a supported
+  deployment target — the stack is pre-release and deploys one spec revision
+  at a time.)
   A server
   advertises channel support with the `supports_channels` flag in ark info
   (ARK #0); a client MUST NOT attempt a channel open against a server that does
@@ -1705,8 +1733,9 @@ The channel work extends the protocol without disturbing existing flows.
   the registered transfer, which spends the input by key path with no delay —
   is why `ChannelReady` gates on ARK #5 registration, and why the retained
   chain and the watch duty must survive restarts *and outlive the scope* —
-  the duty ends only when the input's output is conclusively spent or swept,
-  not at forfeit ("Open by upgrade", registration and the parent-exit
+  the duty ends only when the input's output is spent or an ancestor's
+  confirmed expiry sweep forecloses its creation, not at forfeit ("Open by
+  upgrade", registration and the parent-exit
   response). It is the forfeit-watch pattern
   applied to an open, and load-bearing for the channel balance.
 * **An upgrade adds no arkoor trust.** Only the holder can request spends of

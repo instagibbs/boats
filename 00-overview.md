@@ -112,6 +112,22 @@ this series:
 In addition to these static parameters, the server publishes its current
 offboard fee rate through a dedicated query (see ARK #7).
 
+### The exit-delta response window
+
+`vtxo_exit_delta` is the universal response window of the series: every
+race-response duty — the checkpoint response to an exit under an arkoor
+transfer (ARK #5), forfeit watching (ARK #4, ARK #7), the parent-exit
+response to an upgraded input's exit (ARK #8) — pits a presigned key-path
+spend (`nSequence = 0`) against a user clause delayed by `exit_delta`. Under
+the TRUC relay rules (ARK #6) a zero-fee level enters the mempool only after
+its parent confirms, so when the contested output confirms at height `H` the
+defender's spend is mineable at `H + 1` and the delayed clause at
+`H + exit_delta`: the defender's exclusive lead is `exit_delta − 1` blocks,
+and at `exit_delta = 1` every such defense degenerates to a same-block fee
+race. A server MUST publish a `vtxo_exit_delta` comfortably larger than its
+worst-case respond-and-confirm time — watch latency, broadcast, and
+fee-bumping through congestion. The reference default is 144.
+
 ### Fee schedule
 
 The `fees` parameter is a *fee schedule*: a set of per-operation entries the

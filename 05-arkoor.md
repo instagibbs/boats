@@ -186,9 +186,11 @@ Requirements (server):
   and partials, against the fresh sender nonces of the retry (below) — and
   one whose identity differs MUST be rejected. Re-signing the identical
   transactions under fresh nonces yields only additional signatures over the
-  same txids, so no conflicting spend can result. A server MAY answer a
-  byte-identical retry by replaying its stored response verbatim (the
-  degenerate safe case); a sender MUST NOT rely on replay.
+  same txids, so no conflicting spend can result. A byte-identical duplicate
+  is not a retry but a transport retransmission within the same signing
+  session — a conforming retry always carries fresh nonces, so it is never
+  byte-identical; a server MAY answer such a duplicate by replaying its
+  stored response verbatim, and a sender MUST NOT rely on that replay.
 
 ### `arkoor_cosign_response`
 
