@@ -25,6 +25,8 @@ Stories apply to both user personas unless marked otherwise.
 * 🧭 **Goal** — a committed product goal whose protocol design is not yet
   specified. Stated here so the deliverable is judged against it; the open
   questions are gathered in "Open design work" at the end.
+* 📐 **Specified** — the protocol design is normative in the spec;
+  implementation and tests pending.
 
 ---
 
@@ -50,11 +52,12 @@ Stories apply to both user personas unless marked otherwise.
 * ✅ As a server, I want every backing output's expiry bounded at admission,
   so an absent user can never park my future channel earnings behind an
   unbounded client-held exit. ("Board", expiry admission bound)
-* 🧭 As a user, I want to **upgrade** any VTXO I hold into a channel — an
+* 📐 As a user, I want to **upgrade** any VTXO I hold into a channel — an
   arkoor self-spend into the `channel-funding` policy — so an open from
   off-chain balance is instant: no round to wait for, no on-chain footprint,
   no confirmation wait (the anchor confirmed long ago). The next channel
   refresh then resets the inherited expiry and depth as it would anyway.
+  ("Open by upgrade")
 * 🧭 As a user, I want an incoming **Lightning payment to become a channel**:
   the server is both the arkoor sender and the channel peer, so it can fund a
   new channel VTXO on the spot and land the payment in it — settle-then-fund,
@@ -234,14 +237,17 @@ The 🧭 items gathered, as the questions to answer next:
      off-chain balance. The ordering is clean — the arkoor tx's txid is
      independent of its signatures, so the bridge txid is known up front and
      the initial commitment can be exchanged *before* the arkoor + bridge
-     cosign, making the cosign the point of no return with the full safety
-     gate satisfied at that moment (the board's gate, with "broadcast"
-     replaced by "cosign"). A self-spend adds no arkoor double-sign trust:
+     cosign, giving the full safety gate before anything is signed (the
+     board's gate, with "broadcast" replaced by "register" — ARK #5
+     registration is the point of no return, since the intact input exit
+     remains the fallback until then). A self-spend adds no arkoor
+     double-sign trust:
      only the holder can request spends of its own input. The upgraded
      channel inherits the parent's expiry and depth (+1, or +2 through a
      checkpoint) — admission needs a remaining-runway floor, and the standard
      channel refresh resets both at the next round. Round-issued opens are
-     subsumed: open = upgrade, maintain = refresh.
+     subsumed: open = upgrade, maintain = refresh. **Now specified**: "Open
+     by upgrade" and the `arkoor_cosign_request` variant in "Messages".
    * **Board unification** (intended endpoint): once upgrade exists, the
      ARK #3 channel-board variant is deleted — an on-chain open becomes a
      *vanilla* board plus an instant upgrade once the board is spendable.
@@ -255,8 +261,9 @@ The 🧭 items gathered, as the questions to answer next:
      creates a parent-exit race the server must watch — its defense is
      broadcasting the upgrade transaction it holds, so `ChannelReady` MUST
      gate on ARK #5 registration completing. Same class as forfeit
-     watching, but load-bearing for channel balance, and the design isn't
-     written yet.
+     watching, but load-bearing for channel balance — now specified as the
+     registration gate and the parent-exit watch ("Open by upgrade"), so
+     what remains for unification is deleting the board variant.
    * **Receive-into-channel.** Split by who the arkoor sender is. For a
      **Lightning receive** — the JIT case — the sender is the *server*,
      which is also the channel peer, so establishment interleaves freely.

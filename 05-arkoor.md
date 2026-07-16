@@ -157,7 +157,12 @@ Requirements (server):
   Lightning — reuse the same checkpoint/arkoor transaction machinery with
   HTLC inputs, but the generic arkoor endpoint specified in this document
   accepts only `pubkey` inputs. Destination *output* policies are not
-  otherwise restricted by this endpoint.)
+  otherwise restricted by this endpoint, with one exception: a
+  `channel-funding` destination (ARK #8) MUST NOT be cosigned except through
+  the ARK #8 channel variant of this request, together with its bridge — a
+  `channel-funding` output carries no user spending clause at all, so without
+  a cosigned bridge the funds would be stranded behind server cooperation
+  until the expiry sweep.)
 * MUST reject an input whose own exit transaction has already been seen
   on-chain or in the mempool (an input being exited unilaterally MUST NOT be
   arkoor-spent). There is no explicit expiry check; the server's protection
