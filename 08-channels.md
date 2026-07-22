@@ -1643,7 +1643,13 @@ that MUST survive a crash:
   broadcast — its split transactions are its new VTXOs' genesis levels, so
   retaining them is not a new obligation, only watching is. Like the
   refresh deadline, this duty is the user's own protection; it cannot be
-  delegated to the counterparty it defends against.
+  delegated to the counterparty it defends against. Being scoped to the
+  share, the duty ends when no split output remains the user's own:
+  refreshed, the replacement is anchored independently of the old chain;
+  exited, the response has already been given; spent onward, the recipient
+  inherits the ordinary arkoor sender-history exposure (ARK #5), answered
+  as ever by its refresh recommendation — while the server's watch, which
+  onward movement does not end, continues to defend the whole downstream.
 * The response actualizes part of the new VTXOs' genesis chains and nothing
   else: the bridge and the closed channel's transactions are unaffected
   (and now unconfirmable), and the server's expiry-sweep recourse over the
