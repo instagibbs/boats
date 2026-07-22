@@ -1452,35 +1452,53 @@ dust, and signing rules all unchanged — shaped by the close it settles:
   amounts then sum to `V` exactly, so ARK #5's exact-balance rule holds with
   no remainder; the odd satoshi favors the user, and the server MUST verify
   the split on this same floor-plus-remainder basis. A side whose balance
-  floors to zero (and receives no remainder) gets no output. The rule is stated
-  over *totals* deliberately: ARK #5's dust isolation may split a destination
-  to lend the isolation output its floor, which re-routes value but moves
-  none between keys — so a sub-dust side (below `P2TR_DUST`) rides the
-  standard isolation machinery, and a balance the offboard's dust gate would
-  strand settles here at full value (subject to the relayability floor of the
-  next bullet). (Binding the user side to `A` keeps the
+  floors to zero (and receives no remainder) gets no output. The rule is over
+  per-key *totals* — the summed value to each key, not a count of wire
+  entries — so ARK #5's dust isolation, which may split one side to lend the
+  combined isolation output its floor, composes with it (that split re-routes
+  value but moves none between keys; see the relayability floor below). A
+  balance the offboard's dust gate would strand settles here at full value in
+  the sense that matters off-chain: it becomes a fully-valued, *cooperatively
+  usable* `pubkey` VTXO — spendable by arkoor, refreshable in a round. A
+  sub-dust VTXO is not, however, *independently* unilaterally exitable: like
+  any sub-dust output, its own isolation-fanout level is non-standard to
+  broadcast alone, so it exits only alongside its isolation cohort or by a
+  cooperative spend. "Full value" here means off-chain usability, not
+  standalone on-chain exit. (Binding the user side to `A` keeps the
   whole destination set verifiable from the server's own records; loosening
   it — paying third parties directly out of the close — would not disturb the
   server-share rule, but stays out until something needs it.)
-* **At most one destination per key (the relayability floor).** The split MUST
-  carry at most one `pubkey(A)` output (present iff the user's total is
-  non-zero) and at most one `pubkey(S)` output (present iff the server's is) —
-  no fragmenting a key's balance into several same-key destinations. Without
-  this, an adversarial requester could split its own side into pieces that
-  defeat ARK #5's dust isolation: isolation is allowed to *decline* when no
-  single non-dust destination can lend the sub-dust deficit its `P2TR_DUST`
-  floor, and the server's mirror rule does not catch a list whose largest
-  output is below `2 * P2TR_DUST`. The result would be a checkpoint carrying
-  two below-dust outputs (the fragmented sub-dust side plus the P2A anchor),
-  which is non-standard on its own terms (Bitcoin Core relays at most one
-  dust output per transaction) — so neither party could broadcast the split
-  response, and a Byzantine client publishing the old bridge would win the
-  old-chain race uncontested. With one destination per key, a sub-dust side
-  is a single dust output opposite a single non-dust one, so ARK #5's
-  *mandatory* isolation applies and succeeds for any channel of total value
-  `≥ 2 * P2TR_DUST` (660 sats) — every real channel — routing the sub-dust
-  side behind the combined isolation output. This is the precondition under
-  which the previous bullet's "rides the standard isolation machinery" holds.
+* **The split response must be relayable (the standardness floor).** The
+  transaction the server broadcasts in the split response — the checkpoint
+  spending the channel VTXO output, or the arkoor transaction when
+  `use_checkpoint = false` — MUST be standard, or the defense of "Registration
+  and the split response" can never reach a mempool. The server MUST verify
+  this on the **reconstructed conflict-winning transaction directly**: beyond
+  the single P2A anchor it MUST carry no output below `P2TR_DUST` (Bitcoin Core
+  relays at most one dust output per transaction). Two rules make that
+  reachable, and ARK #5's permissive "MAY mix without isolation" does **not**
+  apply to a downgrade:
+  * **Net per-key totals, not per-entry.** A side's balance may be carried by
+    more than one wire entry only as the isolation lender fragment (below); a
+    requester MUST NOT otherwise fragment a side into several same-key
+    destinations to force multiple sub-dust outputs into the conflict-winning
+    transaction. The direct standardness check above rejects any split that
+    would.
+  * **Sub-dust side ⇒ mandatory isolation, and `V ≥ 2·P2TR_DUST`.** When one
+    side's balance `d` is below `P2TR_DUST` (call it `D`), the split MUST
+    isolate it: the request routes `d` together with a lender fragment `D − d`
+    split off the other side through the combined isolation output (value
+    `D`), leaving the other side's remainder `V − D` as the standalone normal
+    output. This is the one place the wire carries two entries for a single
+    key — the lender's remainder in `outputs` and its `D − d` fragment in
+    `isolated_outputs` — which the net-totals rule permits. The checkpoint is
+    then `[V − D, D, P2A]`, standard iff `V − D ≥ D`, i.e. **`V ≥ 2·P2TR_DUST`
+    (660 sats)**. A downgrade of a channel below that total with a sub-dust
+    side has no standard conflict-winning transaction; the server MUST refuse
+    it (the remaining settlement is the unilateral fallback). This floor is
+    normative, not an economic assumption — BOLT does not forbid a sub-660
+    channel (minimum funding is receiver policy), so the server MUST enforce
+    it rather than assume such channels do not exist.
 * **The server as recipient.** `pubkey(S)` makes the server's share an
   explicit VTXO the server holds as its own user — roles here are keys, not
   identities — where the offboard pays the server implicitly, by forfeit of
@@ -1503,7 +1521,8 @@ dust, and signing rules all unchanged — shaped by the close it settles:
   MUST refresh first (refresh-then-downgrade), which resets its depth; the
   on-chain offboard, extending no chain, has no such bound. Second, the split
   *outputs* may legitimately land at `max_vtxo_exit_depth` (a checkpointed
-  split of an input at `max − 1`): the funds are fully recovered as `pubkey`
+  split of an input at `max − 2`, which adds two levels): the funds are fully
+  recovered as `pubkey`
   VTXOs, but such a maximal-depth VTXO cannot be arkoor-spent again until a
   round refresh resets its depth — the ordinary deep-VTXO discipline (ARK #5
   already recommends refreshing an arkoor-received VTXO), not a fund-safety
@@ -1521,10 +1540,25 @@ bound to exactly this backing VTXO. Each party enforces from its own view:
 the client MUST refuse to build, and the server MUST refuse to cosign, a
 split that violates the shape above — no recorded completed close for the
 input's channel, a destination key outside `{A, S}`, a per-key total
-differing from the close-fixed balances, or more than one destination per
-key (the relayability floor). The split and the offboard are
-alternative settlements of one close, serialized by the VTXO's spent-state —
-which commits *earlier* than either settlement completes. A split cosign
+differing from the close-fixed balances, or a reconstructed conflict-winning
+transaction that is not standard (the relayability floor).
+
+**The spent-state is a single atomic reservation (normative).** The split and
+the offboard are alternative settlements of one close, and the property that
+serializes them — that no VTXO is ever consumed by two settlements — is not an
+incidental consequence of any one flow's bookkeeping but a MUST on the server:
+every **server-mediated** consumer of a VTXO — `prepare_offboard` /
+`finish_offboard` (ARK #7), the arkoor cosign incl. this split (ARK #5), and
+round participation (ARK #4) — MUST check-and-set *one* atomic per-VTXO
+spent-or-reserved state, so that a VTXO reserved or spent by any of them is
+refused by all the others until it is released or resolved. An implementation
+that guards these flows with independent locks is non-conforming: it could
+complete both an offboard payout and a split of one VTXO. (Unilateral exit is
+*not* a server-mediated flow and is not governed by this reservation; its
+races are the on-chain `nSequence = 0`-versus-`exit_delta` semantics of the
+split response and "Unilateral exit / force-close".)
+
+Under that reservation the ordering is definite. A split cosign
 request eligible to have been sent leaves nothing for `prepare_offboard` to
 spend: the spent-mark is written before signing (ARK #5) and is never
 unwound — un-marking would leave the user holding a completable split while
@@ -1532,7 +1566,7 @@ the server collects an offboard forfeit, two `nSequence = 0` spends of the
 same output racing with no defender's lead. The choice of settlement is
 therefore made at the split cosign, not at registration. In the other
 order, once a finish intent is eligible to have been sent, the split cosign
-meets a spent input whose operation identity differs and is rejected
+meets a spent (or reserved) input and is rejected
 (ARK #5). Retries of the split itself follow ARK #5's operation-identity
 rule unchanged.
 
