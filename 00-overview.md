@@ -117,11 +117,14 @@ offboard fee rate through a dedicated query (see ARK #7).
 `vtxo_exit_delta` is the universal response window of the series: every
 race-response duty — the checkpoint response to an exit under an arkoor
 transfer (ARK #5), forfeit watching (ARK #4, ARK #7), the parent-exit
-response to an upgraded input's exit (ARK #8) — pits a presigned key-path
-spend (`nSequence = 0`) against a user clause delayed by `exit_delta`. Under
+response to an upgraded input's exit (ARK #8), the split response after a
+channel downgrade (ARK #8, held by both parties) — pits a presigned key-path
+spend (`nSequence = 0`) against a claim on the same output delayed by
+`exit_delta`, whether that claim is a script clause (a delayed-exit leaf) or
+a presigned transaction (ARK #8's bridge). Under
 the TRUC relay rules (ARK #6) a zero-fee level enters the mempool only after
 its parent confirms, so when the contested output confirms at height `H` the
-defender's spend is mineable at `H + 1` and the delayed clause at
+defender's spend is mineable at `H + 1` and the delayed claim at
 `H + exit_delta`: the defender's exclusive lead is `exit_delta − 1` blocks,
 and at `exit_delta = 1` every such defense degenerates to a same-block fee
 race. A server MUST publish a `vtxo_exit_delta` comfortably larger than its

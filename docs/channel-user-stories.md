@@ -138,10 +138,11 @@ Stories apply to both user personas unless marked otherwise.
 * ✅ As a server, I want a cooperative close to cost no on-chain footprint
   beyond the offboard output itself: commitment, bridge, and closing
   transaction are all discarded once the offboard confirms.
-* 🧭 As a user, I want to close a channel **without leaving the Ark**: the
+* 📐 As a user, I want to close a channel **without leaving the Ark**: the
   same BOLT close, settled by a **downgrade** — an arkoor split of the
   channel VTXO into plain `pubkey` VTXOs matching the close-fixed balances —
-  instead of an on-chain payout. ("Open design work", channel downgrade)
+  instead of an on-chain payout. A balance the offboard's dust gate would
+  strand settles here at full value. ("Downgrade: close into Ark balance")
 
 ## Unilateral exit / force-close
 
@@ -363,7 +364,11 @@ The 🧭 items gathered, as the questions to answer next:
    transactions and watch the old chain (the parent-exit-response duty,
    made symmetric). Admission: the server MUST NOT cosign any arkoor spend
    of a `channel-funding` VTXO except this sanctioned split, verified
-   against the recorded close outcome.
+   against the recorded close outcome. **Now specified**: "Downgrade:
+   close into Ark balance" and the downgrade note under
+   `arkoor_cosign_request` in "Messages" — with no new wire fields at all;
+   what remains for offboard unification is deleting the channel offboard's
+   amended amount rule.
 
    The empty-channel precondition costs a wallet nothing: the client is an
    endpoint, not a forwarder — inbound HTLCs settle at its own discretion

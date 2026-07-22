@@ -156,7 +156,12 @@ Requirements (server):
   (`pubkey`); HTLC policies are not accepted here. (Other flows — e.g.
   Lightning — reuse the same checkpoint/arkoor transaction machinery with
   HTLC inputs, but the generic arkoor endpoint specified in this document
-  accepts only `pubkey` inputs. Destination *output* policies are not
+  accepts only `pubkey` inputs. One further input is admitted through this
+  endpoint with no new fields: a `channel-funding` input (ARK #8) is accepted
+  exactly when the request is the sanctioned **downgrade split** of a
+  recorded completed channel close, verified per ARK #8's downgrade admission
+  rules; every other arkoor spend of a `channel-funding` input MUST be
+  rejected. Destination *output* policies are not
   otherwise restricted by this endpoint, with one exception: a
   `channel-funding` destination (ARK #8) MUST NOT be cosigned except through
   the ARK #8 channel variant of this request, together with its bridge — a
