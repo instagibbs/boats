@@ -1398,8 +1398,8 @@ forfeit exists.
 
 A **downgrade** is the upgrade run in reverse: a cooperative close whose
 settlement stays off-chain. The same two halves as the offboard, in the same
-strict order — first the standard BOLT close ("The close", which applies to
-the downgrade in its entirety) terminally fixes the final balances; then the
+strict order — first the standard BOLT close terminally fixes the final
+balances; then the
 close is settled at the Ark layer by an out-of-round **split** (ARK #5): a
 single-part transfer that spends the channel VTXO into plain `pubkey` VTXOs
 matching the close-fixed balances — the user's to `pubkey(A)`, the server's
@@ -1441,17 +1441,46 @@ dust, and signing rules all unchanged — shaped by the close it settles:
   binding) or to `S` (the server pubkey), and the per-key totals MUST equal
   the final balances fixed by the completed close, before any closing-fee
   deduction — the closing fee is never paid, since the closing transaction is
-  broadcast only in the fallback. The two balances sum to the channel VTXO's
-  value by construction, so ARK #5's exact balance rule holds without
-  remainder. A side whose balance is zero gets no output. The rule is stated
+  broadcast only in the fallback. **The sub-satoshi remainder.** Lightning
+  balances are in millisatoshis, and the channel VTXO's value is a whole-sat
+  amount, so the two msat balances sum to `V × 1000` exactly but their
+  individual millisat remainders sum to either `0` or `1000`. Each side's sat
+  total is its close-fixed balance floored to whole satoshis; when the two
+  floors fall one satoshi short of `V` (the balances carried a sub-sat
+  remainder, which a BOLT close would drop to the closing fee), that single
+  satoshi MUST be added to the user's `pubkey(A)` total. The destination
+  amounts then sum to `V` exactly, so ARK #5's exact-balance rule holds with
+  no remainder; the odd satoshi favors the user, and the server MUST verify
+  the split on this same floor-plus-remainder basis. A side whose balance
+  floors to zero (and receives no remainder) gets no output. The rule is stated
   over *totals* deliberately: ARK #5's dust isolation may split a destination
   to lend the isolation output its floor, which re-routes value but moves
   none between keys — so a sub-dust side (below `P2TR_DUST`) rides the
   standard isolation machinery, and a balance the offboard's dust gate would
-  strand settles here at full value. (Binding the user side to `A` keeps the
+  strand settles here at full value (subject to the relayability floor of the
+  next bullet). (Binding the user side to `A` keeps the
   whole destination set verifiable from the server's own records; loosening
   it — paying third parties directly out of the close — would not disturb the
   server-share rule, but stays out until something needs it.)
+* **At most one destination per key (the relayability floor).** The split MUST
+  carry at most one `pubkey(A)` output (present iff the user's total is
+  non-zero) and at most one `pubkey(S)` output (present iff the server's is) —
+  no fragmenting a key's balance into several same-key destinations. Without
+  this, an adversarial requester could split its own side into pieces that
+  defeat ARK #5's dust isolation: isolation is allowed to *decline* when no
+  single non-dust destination can lend the sub-dust deficit its `P2TR_DUST`
+  floor, and the server's mirror rule does not catch a list whose largest
+  output is below `2 * P2TR_DUST`. The result would be a checkpoint carrying
+  two below-dust outputs (the fragmented sub-dust side plus the P2A anchor),
+  which is non-standard on its own terms (Bitcoin Core relays at most one
+  dust output per transaction) — so neither party could broadcast the split
+  response, and a Byzantine client publishing the old bridge would win the
+  old-chain race uncontested. With one destination per key, a sub-dust side
+  is a single dust output opposite a single non-dust one, so ARK #5's
+  *mandatory* isolation applies and succeeds for any channel of total value
+  `≥ 2 * P2TR_DUST` (660 sats) — every real channel — routing the sub-dust
+  side behind the combined isolation output. This is the precondition under
+  which the previous bullet's "rides the standard isolation machinery" holds.
 * **The server as recipient.** `pubkey(S)` makes the server's share an
   explicit VTXO the server holds as its own user — roles here are keys, not
   identities — where the offboard pays the server implicitly, by forfeit of
@@ -1462,14 +1491,23 @@ dust, and signing rules all unchanged — shaped by the close it settles:
 * **No fee.** Like the upgrade: the split commits no new server capital and
   inherits the scope's existing maturity, so like any arkoor transfer it is
   not separately priced.
-* **Inherited scope.** The new VTXOs inherit the input's `expiry_height`,
-  `exit_delta`, and anchor (ARK #5), at one or two more exit levels per the
-  server's checkpoint policy; the user refreshes them per ARK #4 as it would
-  any VTXO. One bound bites early: ARK #5 admits an input only below
-  `max_vtxo_exit_depth`, and a channel VTXO may legitimately sit *at* its
-  pinned `channel_max_vtxo_exit_depth` — such a channel cannot split until a
-  refresh resets its depth. The remedy is refresh-then-downgrade; the
-  offboard, which extends no chain, has no such bound.
+* **Inherited scope and the depth bound.** The new VTXOs inherit the input's
+  `expiry_height`, `exit_delta`, and anchor (ARK #5), at one more exit level
+  without a checkpoint or two with one; the user refreshes them per ARK #4 as
+  it would any VTXO. Two depth facts bite. First, the split can be *cosigned*
+  only if the channel VTXO's own depth leaves room: ARK #2 refuses a
+  transition spending an input at depth `≥ max_vtxo_exit_depth`, and a
+  checkpointed split spends the checkpoint output (input depth + 1), so a
+  no-checkpoint split needs input depth `≤ max_vtxo_exit_depth − 1` and a
+  checkpointed one `≤ max_vtxo_exit_depth − 2`. A channel too deep to split
+  MUST refresh first (refresh-then-downgrade), which resets its depth; the
+  on-chain offboard, extending no chain, has no such bound. Second, the split
+  *outputs* may legitimately land at `max_vtxo_exit_depth` (a checkpointed
+  split of an input at `max − 1`): the funds are fully recovered as `pubkey`
+  VTXOs, but such a maximal-depth VTXO cannot be arkoor-spent again until a
+  round refresh resets its depth — the ordinary deep-VTXO discipline (ARK #5
+  already recommends refreshing an arkoor-received VTXO), not a fund-safety
+  concern.
 
 ### Admission
 
@@ -1482,8 +1520,9 @@ under "The close" — the same record the offboard's amount rule reads,
 bound to exactly this backing VTXO. Each party enforces from its own view:
 the client MUST refuse to build, and the server MUST refuse to cosign, a
 split that violates the shape above — no recorded completed close for the
-input's channel, a destination key outside `{A, S}`, or a per-key total
-differing from the close-fixed balances. The split and the offboard are
+input's channel, a destination key outside `{A, S}`, a per-key total
+differing from the close-fixed balances, or more than one destination per
+key (the relayability floor). The split and the offboard are
 alternative settlements of one close, serialized by the VTXO's spent-state —
 which commits *earlier* than either settlement completes. A split cosign
 request eligible to have been sent leaves nothing for `prepare_offboard` to
@@ -1499,6 +1538,18 @@ rule unchanged.
 
 ### Registration and the split response
 
+**What the downgrade takes from "The close," and what it does not.** The
+downgrade shares the close's balance half exactly: the BOLT close fixes the
+final balances (the object the split is verified against), and the signed
+closing transaction is the user's fallback between close and settlement,
+under the same retention and force-close-deadline discipline. It does **not**
+take the offboard's *Ark-leg* recovery — the `prepare_offboard` /
+`finish_offboard` exchange, the Prepared → FinishOutcomeUnknown state
+machine, and the "hold the backing on the force-close scheduler until a
+finish intent may be live" rule are all offboard-specific and do not apply. A
+downgrade never sends `finish_offboard`; its point of no return and its
+recovery are the split's own, specified here.
+
 The ordering and recovery posture are the upgrade's, run in reverse. The
 arkoor txids are witness-independent, so the user verifies every partial
 signature and completes the split knowing exactly the transactions the
@@ -1507,7 +1558,12 @@ server can later hold; until the user registers the signed transactions
 ARK #0) and cannot actualize the split — so the closing-transaction
 fallback of "The close" remains *safe*, not merely available. Registration
 is the point of no return: it is what arms the server's response and
-retires the fallback. Concretely:
+retires the fallback. **Registration here means the complete split** — every
+arkoor level of *both* the `pubkey(A)` and `pubkey(S)` outputs, not ARK #5's
+"at minimum the checkpoint" — because the server's response (below) and its
+own `pubkey(S)` share are actualizable only if it durably holds the whole
+signed chain; a server MUST NOT treat a downgrade as registered, arm its
+response, or consider the settlement final until it does. Concretely:
 
 * Before registration is eligible to have been sent, a failed exchange
   leaves a closed channel and an unresolved (possibly spent-marked) VTXO:
