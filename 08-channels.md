@@ -1524,7 +1524,12 @@ dust, and signing rules all unchanged — shaped by the close it settles:
   checkpointed split spends the checkpoint output (input depth + 1), so a
   no-checkpoint split needs input depth `≤ max_vtxo_exit_depth − 1` and a
   checkpointed one `≤ max_vtxo_exit_depth − 2`. A channel too deep to split
-  MUST refresh first (refresh-then-downgrade), which resets its depth; the
+  MUST refresh first (refresh-then-downgrade), which resets its depth — and
+  the user MUST make that check **before initiating the close**: the close
+  is a one-way door, and a channel found too deep only after it has closed
+  has already lost the refresh remedy (a closed channel cannot teleport),
+  leaving only the offboard, where the balance clears that flow's gate, and
+  the unilateral fallback. The
   on-chain offboard, extending no chain, has no such bound. Second, the split
   *outputs* may legitimately land at `max_vtxo_exit_depth` (a checkpointed
   split of an input at `max − 2`, which adds two levels): the funds are fully
