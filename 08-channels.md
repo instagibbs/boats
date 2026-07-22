@@ -708,7 +708,13 @@ Concretely — each an observable property that MUST survive a crash:
   signed transactions of the new level(s); ARK #5 registration completing is
   the trigger. Until then the channel MUST NOT operate — which is exactly
   what keeps the pre-registration race harmless: the server's balance is
-  still zero, so an aborting user can only reclaim its own funds.
+  still zero, so an aborting user can only reclaim its own funds. The abort
+  is also final: a registration arriving after the input's exit transaction —
+  the chain's final level, which actualizes the input's output and starts
+  its leaf's `exit_delta` clock — has confirmed (the watch below resolved
+  with no response to broadcast) MUST be refused rather than completed,
+  since completing it would release `ChannelReady` into a channel whose
+  backing is being clawed back.
 * The server MUST retain those transactions, and MUST watch for any prefix
   of the input's exit chain confirming, for as long as the input's
   delayed-exit leaf is live: not merely for the scope's life, but until the
@@ -1642,6 +1648,38 @@ that MUST survive a crash:
   else: the bridge and the closed channel's transactions are unaffected
   (and now unconfirmable), and the server's expiry-sweep recourse over the
   actualized outputs is preserved.
+
+**Where the race is decided.** The contested event is the confirmation of
+the exit chain's *final* transaction — the one that creates the channel
+VTXO's output on-chain and thereby starts the bridge's `exit_delta` clock.
+Neither endpoint of intuition is it: not the closing transaction, which
+spends the bridge and merely finishes an already-won fallback, and not the
+bridge's own confirmation, which would leave the whole `exit_delta` window
+undecided. Nor is it any earlier prefix of the chain confirming: prefixes
+are shared ancestors that actualize whenever a co-user of the same tree
+exits, the contested output does not yet exist, and no clock runs — a
+confirmed prefix sharpens the watch (the duty above) but decides nothing,
+and in particular MUST NOT be treated as the fallback in progress. What
+the final transaction's confirmation means is fixed by whether the
+complete split was registered when it happened. Registered first: the
+armed response wins by construction — the retained conflict-winning
+transaction spends the just-actualized output at `nSequence = 0`,
+`exit_delta − 1` blocks ahead of the bridge — and the split settles the
+close. Confirmed first, split unregistered: the settlement is the
+unilateral fallback, already in progress — the server holds no signed
+response and its watch resolves with none — and the server MUST refuse the
+split's registration from then on, even though the bridge's `exit_delta`
+has not yet elapsed and a late-armed response could in principle still
+outrace it. The reason is that the two settlements conflict only at the
+contested output, while a VTXO's value is not that output but the server's
+off-chain recognition of it, which no on-chain conflict polices: a server
+that recognized the split after conceding the chain race would settle the
+same close twice — the closing transaction pays the final balances on-chain
+while the registered VTXOs are honored off-chain, paying the user's side
+twice. The refusal extends the settlements' on-chain mutual exclusion to
+that recognition, and is the downgrade's counterpart of the upgrade's
+late-registration refusal ("Open by upgrade"), where completing after the
+abort would release the channel instead.
 
 ### Sequence
 
