@@ -1318,6 +1318,22 @@ Requirements:
   its Lightning anchor/package path instead. A retained low-fee closing
   transaction with neither fee path is not a complete fallback, and
   re-selecting it unchanged makes no progress.
+* **A failed fee negotiation wedges the close; policy should make it
+  unfailable.** Under `closing_signed`, disjoint fee expectations leave the
+  channel closing-but-never-closed: `shutdown` has already barred updates
+  (and a shutdown-pending channel cannot refresh), no close record exists,
+  and no settlement can begin — the recourse is the unilateral fallback
+  under "The refresh / force-close deadline", via the commitment path (no
+  closing transaction was ever signed). The negotiation is not worth
+  failing: the fee buys nothing in the cooperative outcome — it is deducted
+  only from the fallback artifact, and every settlement is verified against
+  the pre-fee balances — so the non-funder (the server, in every channel of
+  this document) SHOULD accept any fee at or above its relay floor, and the
+  funder SHOULD prefer conceding upward to wedging, since its fallback
+  retains the commitment alternative regardless. `option_simple_close`,
+  where each closer pays from its own output under unconditional
+  signatures, removes the negotiation — and this failure mode — entirely,
+  and SHOULD be preferred once available.
 
 The close is a one-way door: `shutdown` commits the channel to closing
 (BOLT-2), and there is no abort-and-resume — unlike a refresh, whose teleport
