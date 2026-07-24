@@ -135,18 +135,39 @@ One *part* per input VTXO; parts MAY be batched into a package (see below).
 | `user_pub_nonces` | `nb_sigs` MuSig2 public nonces, in signing order |
 | `attestation` | schnorr_sig |
 
-The attestation is a BIP-340 signature by the input VTXO's user key over:
+The attestation is a BIP-340 signature by the input VTXO's user key over the
+part's **complete operation identity** (below) — everything the spent-mark
+records, so the authorization cannot be replayed against a different
+operation — but *not* the per-session MuSig2 nonces, which are fresh on every
+retry (binding them would break the attestation across the retries the
+operation-identity rule permits). It signs:
 
 ```
 sha256(
   "arkoor cosign attestation       "   (32 bytes, ASCII)
 ‖ vtxo_id                              (36 bytes)
-‖ nb_outputs                           (u32, little-endian)
-‖ for each output (normal then isolated):
+‖ use_checkpoint                       (1 byte: 0x00 | 0x01)
+‖ nb_normal_outputs                    (u32, little-endian)
+‖ for each NORMAL output:
     total_amount                       (u64, little-endian)
   ‖ policy                             (protocol encoding)
+‖ nb_isolated_outputs                  (u32, little-endian)
+‖ for each ISOLATED output:
+    total_amount                       (u64, little-endian)
+  ‖ policy                             (protocol encoding)
+‖ extension fields, in canonical order, each present only when the operation
+  carries it — currently just ARK #8's channel_id (32 bytes)
 )
 ```
+
+Binding `use_checkpoint` and the two lists **distinctly** (each under its own
+count, rather than one flat list) matters: both are part of the operation
+identity, so a captured, still-valid attestation replayed with a flipped
+`use_checkpoint`, a destination moved between the normal and isolated lists,
+or (for a channel operation) a different `channel_id` would otherwise produce
+a *different* transaction — a different spending txid — under the same
+signature, consuming the input's spent-mark against an operation the holder
+did not authorize and forcing the honest operation to fall back.
 
 Requirements (server):
 
@@ -156,8 +177,18 @@ Requirements (server):
   (`pubkey`); HTLC policies are not accepted here. (Other flows — e.g.
   Lightning — reuse the same checkpoint/arkoor transaction machinery with
   HTLC inputs, but the generic arkoor endpoint specified in this document
-  accepts only `pubkey` inputs. Destination *output* policies are not
-  otherwise restricted by this endpoint.)
+  accepts only `pubkey` inputs. One further input is admitted through this
+  endpoint with no new fields: a `channel-funding` input (ARK #8) is accepted
+  exactly when the request is the sanctioned **downgrade split** of a
+  recorded completed channel close, verified per ARK #8's downgrade admission
+  rules; every other arkoor spend of a `channel-funding` input MUST be
+  rejected. Destination *output* policies are not
+  otherwise restricted by this endpoint, with one exception: a
+  `channel-funding` destination (ARK #8) MUST NOT be cosigned except through
+  the ARK #8 channel variant of this request, together with its bridge — a
+  `channel-funding` output carries no user spending clause at all, so without
+  a cosigned bridge the funds would be stranded behind server cooperation
+  until the expiry sweep.)
 * MUST reject an input whose own exit transaction has already been seen
   on-chain or in the mempool (an input being exited unilaterally MUST NOT be
   arkoor-spent). There is no explicit expiry check; the server's protection
@@ -171,7 +202,24 @@ Requirements (server):
   cosignature per sighash, produced first-signer one-shot (ARK #0).
 * MUST persist the input VTXO as spent *before* signing (signing twice over
   the same input with different outputs is theft-enabling; see Security
-  notes); retries of the identical request are answered idempotently.
+  notes). The spent-mark records the part's **operation identity** — the
+  input, the ordered normal and isolated destination lists, and
+  `use_checkpoint` (plus any extension fields, e.g. ARK #8's `channel_id`); a
+  package's identity is the ordered list of its parts'. Retries are judged
+  against that identity, not against request bytes: a request for a spent
+  input whose identity matches MUST be answered with a **fresh signing
+  session** over the same reconstructed transactions — fresh server nonces
+  and partials, against the fresh sender nonces of the retry (below) — and
+  one whose identity differs MUST be rejected. Re-signing the identical
+  transactions under fresh nonces yields only additional signatures over the
+  same txids, so no conflicting spend can result. A byte-identical duplicate
+  is not a retry but a transport retransmission within the same signing
+  session — a conforming retry always carries fresh nonces, so it is never
+  byte-identical. A server MUST NOT open a fresh signing session for a
+  byte-identical duplicate — pairing the sender's already-used public nonces
+  with new server nonces is precisely the cross-session nonce reuse the
+  retry rule exists to prevent — it MUST either replay its stored response
+  verbatim or reject the duplicate; a sender MUST NOT rely on replay.
 
 ### `arkoor_cosign_response`
 
@@ -187,6 +235,13 @@ Requirements (sender):
 * MUST verify every server partial signature (BIP-327 partial verification
   against the corresponding sighash, tweak, and nonces) before producing its
   own partial signatures.
+* On any retry — a lost, timed-out, or unverifiable response — MUST discard
+  the session's secret nonces and generate fresh ones: a secret nonce never
+  participates in more than one signing session (the nonce discipline of
+  ARK #4 failure handling). The operation-identity rule above is what makes
+  the retry answerable: the server re-signs the same transactions in a fresh
+  session, so a sender that has lost its secret nonces mid-exchange recovers
+  by the same path.
 * Completes each final signature, embeds them in the new VTXOs' genesis
   items, and delivers the new VTXOs to the recipients (delivery — e.g. the
   mailbox protocol — is out of scope for this document).
@@ -207,6 +262,31 @@ follow for an interoperating implementation:
   recipient's exit (Security notes, below) if it holds that signed
   transaction. Until the chain is registered, the checkpoint-sweeping
   guarantee does not hold.
+
+**Registration as a point of no return.** "At minimum the checkpoint" is the
+floor for a generic transfer, where a lost or partial upload only weakens the
+uploader's own onward-spendability. A flow that treats registration as its
+*point of no return* — the ARK #8 upgrade and downgrade, where completing
+registration is what arms a server duty (the parent-exit / split response) or
+releases a channel — needs more, and MUST require it:
+
+* **Completeness.** Registration for such a flow means the **complete** set of
+  levels the duty depends on, not the checkpoint alone — for the downgrade,
+  every arkoor level of *both* the `pubkey(A)` and `pubkey(S)` outputs; for an
+  upgrade, the full chain actualizing the channel VTXO. The server MUST NOT
+  treat the operation as registered, arm its duty, or release a channel until
+  it durably holds all of them.
+* **Atomicity and idempotency.** The server MUST apply a registration as a
+  single all-or-nothing transition over its required levels, and MUST accept a
+  byte-identical re-upload idempotently (a lost acknowledgement is recovered by
+  replay, not by a second, divergent operation). A partial upload leaves the
+  operation *unregistered* — the point of no return is not crossed — so the
+  uploader's pre-registration fallback (the intact input exit, or the closing
+  transaction) remains its recovery.
+* **Durability.** The registered set MUST survive a crash: a server that has
+  armed a duty on a registration it cannot re-derive after restart would drop
+  the defense. Registration is therefore recorded before the duty is reported
+  armed.
 
 ### Packages
 

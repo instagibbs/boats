@@ -104,7 +104,10 @@ These may appear as the `policy` of a user's VTXO and in VTXO requests.
 `pubkey` is the general-purpose policy: it is accepted as a round
 (signed-tree) output and as an arkoor-spendable input (ARK #4, ARK #5).
 `channel-funding` (the backing VTXO of a Lightning channel, ARK #8) is accepted
-as a round output only in the channel-refresh flow and is not
+as a round output only in the channel-refresh flow, and as an arkoor input only
+through the one sanctioned ARK #8 flow — the **downgrade split** of a
+cooperatively closed channel (ARK #8 "Downgrade: close into Ark balance"),
+verified against the recorded close outcome. It is otherwise not
 arkoor-spendable. The HTLC policies arise only in the Lightning send/receive
 flows (out of scope for this series) and are neither valid round outputs nor
 arkoor inputs.

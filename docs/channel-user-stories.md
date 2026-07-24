@@ -25,6 +25,8 @@ Stories apply to both user personas unless marked otherwise.
 * 🧭 **Goal** — a committed product goal whose protocol design is not yet
   specified. Stated here so the deliverable is judged against it; the open
   questions are gathered in "Open design work" at the end.
+* 📐 **Specified** — the protocol design is normative in the spec;
+  implementation and tests pending.
 
 ---
 
@@ -50,11 +52,12 @@ Stories apply to both user personas unless marked otherwise.
 * ✅ As a server, I want every backing output's expiry bounded at admission,
   so an absent user can never park my future channel earnings behind an
   unbounded client-held exit. ("Board", expiry admission bound)
-* 🧭 As a user, I want to **upgrade** any VTXO I hold into a channel — an
+* 📐 As a user, I want to **upgrade** any VTXO I hold into a channel — an
   arkoor self-spend into the `channel-funding` policy — so an open from
   off-chain balance is instant: no round to wait for, no on-chain footprint,
   no confirmation wait (the anchor confirmed long ago). The next channel
   refresh then resets the inherited expiry and depth as it would anyway.
+  ("Open by upgrade")
 * 🧭 As a user, I want an incoming **Lightning payment to become a channel**:
   the server is both the arkoor sender and the channel peer, so it can fund a
   new channel VTXO on the spot and land the payment in it — settle-then-fund,
@@ -135,6 +138,11 @@ Stories apply to both user personas unless marked otherwise.
 * ✅ As a server, I want a cooperative close to cost no on-chain footprint
   beyond the offboard output itself: commitment, bridge, and closing
   transaction are all discarded once the offboard confirms.
+* 📐 As a user, I want to close a channel **without leaving the Ark**: the
+  same BOLT close, settled by a **downgrade** — an arkoor split of the
+  channel VTXO into plain `pubkey` VTXOs matching the close-fixed balances —
+  instead of an on-chain payout. A balance the offboard's dust gate would
+  strand settles here at full value. ("Downgrade: close into Ark balance")
 
 ## Unilateral exit / force-close
 
@@ -234,14 +242,17 @@ The 🧭 items gathered, as the questions to answer next:
      off-chain balance. The ordering is clean — the arkoor tx's txid is
      independent of its signatures, so the bridge txid is known up front and
      the initial commitment can be exchanged *before* the arkoor + bridge
-     cosign, making the cosign the point of no return with the full safety
-     gate satisfied at that moment (the board's gate, with "broadcast"
-     replaced by "cosign"). A self-spend adds no arkoor double-sign trust:
+     cosign, giving the full safety gate before anything is signed (the
+     board's gate, with "broadcast" replaced by "register" — ARK #5
+     registration is the point of no return, since the intact input exit
+     remains the fallback until then). A self-spend adds no arkoor
+     double-sign trust:
      only the holder can request spends of its own input. The upgraded
      channel inherits the parent's expiry and depth (+1, or +2 through a
      checkpoint) — admission needs a remaining-runway floor, and the standard
      channel refresh resets both at the next round. Round-issued opens are
-     subsumed: open = upgrade, maintain = refresh.
+     subsumed: open = upgrade, maintain = refresh. **Now specified**: "Open
+     by upgrade" and the `arkoor_cosign_request` variant in "Messages".
    * **Board unification** (intended endpoint): once upgrade exists, the
      ARK #3 channel-board variant is deleted — an on-chain open becomes a
      *vanilla* board plus an instant upgrade once the board is spendable.
@@ -255,8 +266,9 @@ The 🧭 items gathered, as the questions to answer next:
      creates a parent-exit race the server must watch — its defense is
      broadcasting the upgrade transaction it holds, so `ChannelReady` MUST
      gate on ARK #5 registration completing. Same class as forfeit
-     watching, but load-bearing for channel balance, and the design isn't
-     written yet.
+     watching, but load-bearing for channel balance — now specified as the
+     registration gate and the parent-exit watch ("Open by upgrade"), so
+     what remains for unification is deleting the board variant.
    * **Receive-into-channel.** Split by who the arkoor sender is. For a
      **Lightning receive** — the JIT case — the sender is the *server*,
      which is also the channel peer, so establishment interleaves freely.
@@ -292,7 +304,8 @@ The 🧭 items gathered, as the questions to answer next:
    forfeit, and the new channel's complete exit story must exist before any
    forfeit. N = 1 plus extra `pubkey` inputs is top-up by close-and-reopen
    in one round. The teleport value rules stay shrink-only. Not critical
-   path.
+   path. (A non-atomic alternative that needs no channel-aware round
+   machinery at all is the downgrade composition, item 5.)
 
 3. **JIT liquidity: sizing, pricing, and the trust window.** Up-front
    inbound fronting at open is not a separate feature: settle-then-fund
@@ -334,6 +347,64 @@ The 🧭 items gathered, as the questions to answer next:
 4. **Mobile expiry UX.** Opportunistic auto-refresh scheduling and
    out-of-band deadline warnings for a wallet that is mostly asleep. The
    protocol deadline math is delivered; the product surface is not.
+
+5. **Channel downgrade (close into Ark balance).** The upgrade run in
+   reverse: a standard BOLT close terminally fixes the balances, then an
+   arkoor split spends the channel VTXO into plain outputs — `pubkey(A)`
+   for the user's balance, `pubkey(S)` for the server's — leaving the
+   user's funds off-chain. Today the only cooperative exit is the
+   offboard's on-chain payout; this is its off-chain sibling, and it reuses
+   the offboard's whole discipline: close first (a real `shutdown` drain,
+   not quiescence — the close outcome is the signed object the server
+   verifies the split against, and nothing times out mid-ceremony), the
+   closing transaction as the user's fallback until registration, ARK #5
+   registration as the point of no return. The split spends the VTXO
+   output by key path at `nSequence = 0`, ahead of the old bridge's
+   `exit_delta` — the forfeit's role — so both sides retain the split
+   transactions and watch the old chain (the parent-exit-response duty,
+   made symmetric). Admission: the server MUST NOT cosign any arkoor spend
+   of a `channel-funding` VTXO except this sanctioned split, verified
+   against the recorded close outcome. **Now specified**: "Downgrade:
+   close into Ark balance" and the downgrade note under
+   `arkoor_cosign_request` in "Messages" — with no new wire fields at all;
+   what remains for offboard unification is deleting the channel offboard's
+   amended amount rule.
+
+   The empty-channel precondition costs a wallet nothing: the client is an
+   endpoint, not a forwarder — inbound HTLCs settle at its own discretion
+   (no long-running inbound short of its own hold invoices), and outbound
+   HTLCs are its own payments — so it starts the downgrade only with
+   nothing in flight and the drain completes in seconds.
+
+   Composition then pays for itself three ways, with zero new round
+   machinery: **consolidation** — downgrade, let the plain VTXOs batch
+   through ordinary rounds with the rest of the wallet, upgrade back —
+   done **piecemeal**, one channel at a time: staggered cycles are never
+   channel-less (no receive gap), the liquidity reset touches only the
+   channel being consolidated, and each step aborts independently, so
+   item 2's atomic N-to-1 round shape is subsumed; a slow maintenance
+   path a client without teleport could live on; and **offboard unification** (the
+   endpoint mirroring item 1's board unification) — a channel close that
+   wants the chain becomes downgrade + a *vanilla* ARK #7 offboard of the
+   resulting `pubkey` VTXO, deleting the channel offboard's amended amount
+   rule ("Amount rule": the single-input restriction,
+   `net_amount + fee ≤ V`, payout-vs-close verification). The exact-balance
+   rule then holds unchanged, the payout can batch with the user's other
+   VTXOs — which the single-input rule forbade — and the server's share
+   arrives as an explicit `pubkey(S)` output rather than implicitly via the
+   forfeit. Cost: two points of no return in sequence (split registration,
+   then `finish_offboard`), each with its already-spec'd recovery. Open =
+   board + upgrade; close = downgrade + offboard: channels would touch the
+   generic flows only at upgrade, refresh, and downgrade. Teleport remains
+   *the* refresh
+   mechanism: its round pre-commitment is unconditional (the leaf request
+   needs only capacity, and committed HTLCs carry across), where any
+   close-based path is conditional on an empty channel at freeze time. A
+   quiescence-based variant that splits dangling HTLCs out into
+   hash/timeout VTXOs is conceivable as an escape hatch; nothing above
+   needs it. Server-side balance returns to the server at the split, so
+   inbound liquidity at re-upgrade is re-provisioned per policy — natural
+   for a deliberate, user-chosen operation. Not critical path.
 
 ---
 
