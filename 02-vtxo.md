@@ -164,7 +164,7 @@ ARK #8).
 
 * internal key: `musig(user_pubkey, server_pubkey)` — the cooperative 2-of-2;
   this is both the path the off-chain **bridge transaction** spends and the path
-  used to forfeit, refresh, or offboard the VTXO
+  used to forfeit, refresh, or cooperatively spend the VTXO
 * leaf: timelock-sign `(expiry_height, S)` — the server sweeps after expiry, when
   the VTXO's tree is left to time out
 
