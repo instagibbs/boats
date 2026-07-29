@@ -272,8 +272,22 @@ independently mergeable. After MR-1 lands, explicitly ask the maintainers
 their preferred chunking for the remainder and re-cut if asked —
 calibrating to the actual reviewer beats theorizing.
 
-**MR-0 — LDK release spike (local; not upstreamed — its assertions carry
-forward as the harness crate's integration tests).**
+**MR-0 — LDK release spike. ✅ DONE 2026-07-29 — ALL SIX ASSERTIONS GREEN
+on stock lightning 0.2.4; the releases-only posture is CONFIRMED, no escape
+hatch needed.** (bark-stage1 branch `ark8-channels-stage1`; scaffold
+`4c654346` + spike `84433678`; suite 6/6 in ~6s, stable serial and
+parallel, clippy-clean.) Key pins for later MRs: the funder PANICS on a
+confirmed funding input with an empty witness (the presigned bridge always
+carries one; synthetic tests must too); a hand-rolled event pump MUST call
+`process_pending_htlc_forwards()`; zero-fee commitments never reach the
+broadcaster standalone — the commitment rides the BumpTransaction package
+(the exit driver takes it from the event, not the broadcaster); the co-op
+closing tx is handed to the broadcaster independently by BOTH sides (same
+txid); use `pending_htlcs[].cltv_expiry` off the bump event rather than
+guessing CLTV margins; funding-unconf force-close and same-height distinct
+SCID requirements confirmed exactly as I-10 assumed. Original scope
+follows (its assertions now live as the harness crate's integration
+tests).
 Two stock LDK 0.2.4 nodes over lightning-net-tokio, capture-only
 broadcaster, manually fed confirmations. Proves, in order:
 (a) manual funding **funder-only** (client calls
