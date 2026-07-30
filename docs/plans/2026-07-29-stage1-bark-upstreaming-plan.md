@@ -276,6 +276,12 @@ independently mergeable. After MR-1 lands, explicitly ask the maintainers
 their preferred chunking for the remainder and re-cut if asked —
 calibrating to the actual reviewer beats theorizing.
 
+**DISPOSITION REVISED 2026-07-30 (Greg): the release-contract branch is
+posted upstream as a DRAFT MR — the series' opener and engagement vehicle,
+superseding the design-issue-first plan (description:
+`2026-07-30-draft-mr-description.md`). The numbered MRs below stack after
+it.**
+
 **MR-0 — LDK release spike. ✅ DONE 2026-07-29 — ALL SIX ASSERTIONS GREEN
 on stock lightning 0.2.4; the releases-only posture is CONFIRMED, no escape
 hatch needed.** (bark-stage1 branch `ark8-channels-stage1`, two commits: scaffold +
