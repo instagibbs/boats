@@ -286,8 +286,13 @@ historical-height virtual confirmation (depth is computed against the live
 best block — the upgrade shape works natively), restart-of-either-side SCID
 stability with the fresh-KeysManager-start-time contract, unannounced/alias
 wire behavior with an alias-routed payment, and structural+fee assertions on
-both bump legs; a third fix round (event-field independence, restart
-fencing, panic-hook serialization) is in flight. The three SCID pins: restart +
+both bump legs asserted against in-test-known data (derived prevout fees,
+descriptor-vs-commitment cross-checks, cryptographic wallet-signature
+verification, witness-script-hash binding — full script-interpreter
+validation deliberately out of scope). **Final codex verdict:
+PASS-WITH-CHANGES, residuals applied — MR-0 CLOSED 2026-07-30** at
+scaffold `a79035a9` + tests `ea33bbf4`; four review records in this
+directory. The three SCID pins: restart +
 identical re-feed keeps the SCID — structurally inert since assignment is
 gated on `funding_tx_confirmation_height == 0`; peers feeding different
 positions both reach ready and payments route — agreement not required;

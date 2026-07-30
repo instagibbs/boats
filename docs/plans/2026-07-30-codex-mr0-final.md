@@ -1,0 +1,30 @@
+FINAL VERDICT: **PASS-WITH-CHANGES**
+
+| Item | Verdict | Evidence |
+|---|---|---|
+| F1: anchor descriptor and commitment fee | **CONFIRMED-FIXED** | Unique P2A output is located in the commitment; descriptor outpoint/value are cross-checked, and fee derives from known funding value minus commitment outputs ([release_contract.rs:341](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/release_contract.rs:341), [release_contract.rs:355](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/release_contract.rs:355), [release_contract.rs:371](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/release_contract.rs:371)). |
+| F1: commitment/HTLC input values | **CONFIRMED-FIXED** | Anchor value comes from the commitment’s P2A output; HTLC values come from commitment outputs, not event amounts ([release_contract.rs:460](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/release_contract.rs:460), [release_contract.rs:551](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/release_contract.rs:551)). |
+| F1: duplicate inputs, signatures, scripts, v3 | **CONFIRMED-FIXED within declared boundary** | Duplicate outpoints are rejected, wallet signatures use BIP-143 plus secp verification, P2WSH witnesses bind to prevout script hashes, and HTLC claims require version 3 ([common/mod.rs:1429](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/common/mod.rs:1429), [common/mod.rs:1448](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/common/mod.rs:1448), [common/mod.rs:1498](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/common/mod.rs:1498), [release_contract.rs:532](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/release_contract.rs:532)). |
+| F6 | **REFUTED — Important remaining defect** | Sequence allocation is under the storage lock, but still occurs before `packages.push` ([common/mod.rs:266](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/common/mod.rs:266), [common/mod.rs:268](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/common/mod.rs:268)). Event stamping does not take that lock ([common/mod.rs:871](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/common/mod.rs:871)), so concurrent processing can expose `ChannelClosed` before insertion completes. |
+| F9 | **CONFIRMED-FIXED** | Quiesce stops/awaits the pump, disconnects and asserts local peerlessness, then awaits its socket handle; restart fences the survivor before snapshots ([common/mod.rs:551](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/common/mod.rs:551), [common/mod.rs:600](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/common/mod.rs:600), [common/mod.rs:618](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/common/mod.rs:618)). |
+| F11 | **CONFIRMED-FIXED** | Final channel type asserts SCID privacy absent; both aliases are checked and the manually routed alias differs from both real SCIDs ([release_contract.rs:921](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/release_contract.rs:921), [release_contract.rs:934](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/release_contract.rs:934), [release_contract.rs:954](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/release_contract.rs:954)). |
+| F12 | **CONFIRMED-FIXED** | Hook swaps are serialized, restore-before-unlock ordering is correct, and both panic tests quiesce first ([common/mod.rs:1279](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/common/mod.rs:1279), [common/mod.rs:1291](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/common/mod.rs:1291), [release_contract.rs:1036](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/release_contract.rs:1036)). |
+| F13 | **CONFIRMED-FIXED** | Planning language is gone and imports are top-level; only minor grammar polish remains in the module docs ([common/mod.rs:1](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/common/mod.rs:1)). |
+| Documentation fix | **CONFIRMED-FIXED** | The docs now correctly distinguish the original instance’s embedded `channel_keys_id` timestamp from the replacement instance’s timestamp ([common/mod.rs:580](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/common/mod.rs:580)); this matches LDK v0.2.4’s `generate_channel_keys_id`. |
+
+F1 vacuity re-run:
+
+- Lied commitment fee and anchor value: caught by the known-value derivation and cross-assertions.
+- Off-commitment anchor/HTLC descriptors: caught by commitment txid/output matching.
+- v2 HTLC claim: caught by the explicit version-3 assertion.
+- Duplicated inputs: caught by `assert_no_duplicate_outpoints`.
+- Garbage wallet witnesses: caught by witness shape, DER/pubkey parsing, BIP-143, and secp verification.
+- Garbage P2WSH stack elements remain intentionally outside scope; wrong witness scripts are caught by the hash binding. Empty P2A witness is intentionally required.
+
+New finding:
+
+- **Minor:** `assert_p2wpkh_witness_valid` normalizes the witness pubkey through `bitcoin::PublicKey::new`, which forces compressed serialization ([common/mod.rs:1468](/home/greg/bitcoin-dev/cleanroom/bark-stage1/bark-channels/tests/common/mod.rs:1468)). An uncompressed pubkey with a valid signature could therefore evade the raw pubkey-hash check. Hash the witness bytes directly or preserve their compression flag.
+
+Commit hygiene is clean: exactly two commits over `upstream/master`, correct split, clean worktree, and `git diff --check` passes. The second message is accurate about the crypto boundary and in-test-known values, but still overclaims capture completion before event observability because of F6.
+
+**Verified clean:** F1’s requested assertions, F9, F11, F12, F13, the timestamp documentation, commit structure, and maintainer-declared scope. No runtime green result is claimed because this read-only environment cannot run the socket tests.
