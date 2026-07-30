@@ -278,11 +278,16 @@ calibrating to the actual reviewer beats theorizing.
 
 **MR-0 — LDK release spike. ✅ DONE 2026-07-29 — ALL SIX ASSERTIONS GREEN
 on stock lightning 0.2.4; the releases-only posture is CONFIRMED, no escape
-hatch needed.** (bark-stage1 branch `ark8-channels-stage1`, two commits after history
-shaping: scaffold `851687e5` + release-contract tests `47913111`
-(`tests/release_contract.rs` + `tests/common/mod.rs`; planning jargon
-scrubbed from code); suite **9/9** in ~6s, stable serial and parallel,
-clippy-clean. The three SCID pins: restart +
+hatch needed.** (bark-stage1 branch `ark8-channels-stage1`, two commits: scaffold +
+release-contract tests (`tests/release_contract.rs` + `tests/common/mod.rs`).
+Suite grew to **11/11** (~3s) through two codex review cycles (records in
+this directory): added pins for the funder's empty-witness panic and
+historical-height virtual confirmation (depth is computed against the live
+best block — the upgrade shape works natively), restart-of-either-side SCID
+stability with the fresh-KeysManager-start-time contract, unannounced/alias
+wire behavior with an alias-routed payment, and structural+fee assertions on
+both bump legs; a third fix round (event-field independence, restart
+fencing, panic-hook serialization) is in flight. The three SCID pins: restart +
 identical re-feed keeps the SCID — structurally inert since assignment is
 gated on `funding_tx_confirmation_height == 0`; peers feeding different
 positions both reach ready and payments route — agreement not required;

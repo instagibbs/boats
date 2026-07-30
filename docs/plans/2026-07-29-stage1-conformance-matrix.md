@@ -280,6 +280,16 @@ justified by an excluded mechanism. Quotes verbatim.
 ## PART 3 — IMPOSSIBLE OR MEANINGLESS WITHOUT THE EXCLUDED MECHANISMS
 ### (stage-1 profile relaxations to make explicit)
 
+> **Status 2026-07-30**: the I-1..I-10 resolutions are now landed normative
+> text — in the restructured `08-channels.md`'s core (the floor `F` and its
+> per-HTLC applications, the two-threshold deadline, the split-headroom
+> SHOULD, the SCID-position rules) or its "Implementation profiles" section
+> (the MUST hardening, the `≥ 2` configuration invariant, the anchor-reorg
+> fail-closed disposition, the two recorded conformance deviations). The
+> entries below are retained as the decision record; `cltv_claim_slack`'s
+> concrete default is a deployment/config matter documented by the
+> implementation, not the spec.
+
 - **I-1 [HEADLINE]** — An upgrade from a third-party arkoor-received (double-sign-trust) VTXO can never shed that trust for the channel's life under stage 1: `channel-funding` is round-issuable *only* through the excluded channel-refresh flow (`02-vtxo.md:106-108`), and the spec's own trust note (`08-channels.md:671-673`) relies on "the next channel refresh". Escape = downgrade → plain refresh → re-upgrade (full close/reopen). **Resolution**: client-side default policy (refresh third-party arkoor receipts before upgrading) + explicit documentation; the exposure is the upgrader's own, so no server admission rule is required.
 - **I-2** — "Refresh or close before expiry" loses one disjunct: a stage-1 channel cannot outlive its VTXO's expiry without a full downgrade → round-refresh → re-upgrade cycle. Needs proactive scheduling and documentation; long-lived in-place channels are explicitly not a stage-1 goal.
 - **I-3** — "The server MUST refuse to open a channel of any other type" (`08-channels.md:250-251`) is inapplicable as written: stage 1 runs a stock LDK channel type. **Resolution**: profile designates the stage-1 channel type (stock `zero_fee_commitments`) and re-states the rule against it; `ark_channel` feature-bit negotiation drops entirely.
