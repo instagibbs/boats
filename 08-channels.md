@@ -124,6 +124,30 @@ Beyond the VTXO trust model (ARK #0), a channel adds:
   NOT accept or forward HTLCs on a channel until it again holds a coherent
   chain view and funding status for it, and if it cannot recover them it MUST
   leave the channel fail-closed rather than rebuild a fresh state and continue.
+
+  A confirmed funding position — block height, transaction index, output
+  index — is how BOLT #7 names a channel (the *short channel id*), and a
+  virtual funding has none: the bridge transaction sits in no block. The
+  channel therefore MUST NOT be announced — a `channel_announcement` would
+  name a position the network would rightly fail to verify against the
+  chain — and every protocol-visible reference to the channel (invoice
+  route hints, forwarding) rides the `option_scid_alias` mechanism, exactly
+  as zero-conf channels already do. An implementation that models the
+  funding as confirmed will synthesize a position internally; the
+  synthesized position carries no protocol meaning, and the peers need not
+  agree on it. What an implementation MUST guarantee is local hygiene: the
+  position MUST be unique among all channels the node operates — channels
+  backed by the same anchor share the anchor's height by construction, so
+  the transaction index is what distinguishes them — and MUST be stable for
+  as long as the funding scope it names exists, across restarts; a
+  refresh's new scope is a new funding outpoint and receives its own
+  position. Deriving the transaction index from the bridge txid — within
+  BOLT #7's 3-byte index space, avoiding the coinbase position — gives
+  restart stability for free and, incidentally, agreement between peers;
+  such a derivation is only probabilistically unique, so a node MUST still
+  detect collisions among its own channels and persist the resolution it
+  applies. The synthesized height is the anchor's actual height, per the
+  rule above.
 * **Expiry is a deadline.** Like every VTXO, a channel VTXO has an
   `expiry_height` after which the server may sweep its backing funds. The user
   MUST refresh or close the channel before expiry — with enough margin to confirm

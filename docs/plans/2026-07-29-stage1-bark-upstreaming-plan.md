@@ -175,7 +175,7 @@ NEW crate: `bark-channels` — the shared LDK harness (base rust-lightning
     uniqueness + restart stability are the hard requirements; peer
     agreement is NOT required (old branch's sides never agreed and worked;
     aliases carry all wire uses) and the channel is never announced (I-10;
-    spec paragraph owed by the restructure track)
+    spec paragraph LANDED 2026-07-30 in the virtual-funding trust bullet)
   broadcaster capture: nothing spending a virtual funding outpoint is
     relayed; the co-op closing tx is committed DURABLY before the capture
     callback returns (LDK hands it over before any persisted event, and
