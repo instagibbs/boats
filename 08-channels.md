@@ -1195,8 +1195,9 @@ core-only implementation does not negotiate it: its operating profile
 designates a stock channel type instead and restricts HTLC exposure by
 policy.*
 
-A channel on Ark is not a vanilla BOLT channel: the parties MUST negotiate a
-dedicated **Ark channel type**. It is not a registered BOLT feature — Ark-aware
+Under this extension a channel on Ark is not a vanilla BOLT channel: the
+parties negotiating the extension MUST use the dedicated **Ark channel
+type**. It is not a registered BOLT feature — Ark-aware
 peers agree on it out of band — but it is negotiated as an experimental feature
 pair, bits `400/401` (the reference's `ark_channel` feature): peers advertise
 the *optional* bit `401` in `init` (and `node_announcement`) — alongside the
@@ -1205,9 +1206,10 @@ and at channel open the *required* bit `400` is the one set in the
 `channel_type`, alongside the `static_remote_key` and `zero_fee_commitments`
 bits it implies. The pair is experimental — chosen clear of allocated BOLT
 bits — so the exact number is subject to change if the type is ever
-standardized. The server MUST refuse to open a channel of any other type
-(channel support on the Ark service is advertised by the `supports_channels`
-flag, see "Compatibility").
+standardized. A server operating this extension MUST refuse to open a channel
+of any other type — the extension's instance of the core's designated-type
+rule ("Channel setup"; channel support on the Ark service is advertised by
+the `supports_channels` flag, see "Compatibility").
 
 The Ark channel type is a BOLT channel using the `zero_fee_commitments` option
 (BOLT #9 feature 40/41, specified in BOLT #3), with the Ark-specific deviations
@@ -1312,14 +1314,12 @@ the exit-delay CSV). The Ark-specific deviations are:
   `channel_max_vtxo_exit_depth` genesis levels, then the bridge, the commitment, and the
   success-path claim — each budgeted at a single block in the floor but any of
   which can run longer under fee pressure (the non-Ark race is only
-  commitment-then-claim; refreshing often to keep exit chains shallow keeps the
-  needed margin realistic). The exit-derived terms come from
+  commitment-then-claim). The exit-derived terms come from
   the channel's pinned `exit_delta` (below) and from its pinned
   `channel_max_vtxo_exit_depth`, so both peers compute the same floor given the
   same buffer; each enforces it from its own configuration, not on the wire.
   Because these values are pinned per channel ("`exit_delta` is pinned at
-  open"), the floor is a **per-channel** quantity, and a refresh — which reuses
-  the pinned timing profile — does not move it. A receiver that commits to a
+  open"), the floor is a **per-channel** quantity. A receiver that commits to a
   single CLTV floor not bound to
   one channel — for example the `min_final_cltv_expiry_delta` of a BOLT-11 invoice
   payable over any of its channels — MUST therefore advertise the **maximum**
@@ -1333,11 +1333,9 @@ the exit-delay CSV). The Ark-specific deviations are:
   `channel_max_vtxo_exit_depth`
   is also the upper bound the budget assumes on the **channel VTXO's own** exit
   depth — the number of genesis levels a force-close must climb: a channel VTXO
-  is only ever a board leaf (depth 1), an upgrade output ("Open by upgrade"),
-  or a refresh round leaf, and the client MUST refuse a refresh whose issued
-  leaf would exceed it (see "Refresh") — or an upgrade whose resulting depth
-  would ("Open by upgrade") — since a deeper exit chain would overrun the
-  budget.
+  is an upgrade output ("Open by upgrade"), and the client MUST refuse an
+  upgrade whose resulting depth would exceed it ("Open by upgrade"), since a
+  deeper exit chain would overrun the budget.
 
   Every timing-profile calculation MUST use checked arithmetic in a type wider
   than its encoded fields. BOLT's channel `cltv_expiry_delta` is a `u16`, so the
@@ -1360,7 +1358,7 @@ above — is fixed **once, at open** — the input VTXO's decoded `exit_delta`
 ("Open by upgrade") — and is
 thereafter a fixed parameter of the channel. Both parties MUST store it (with the
 channel's other parameters, keyed by `channel_id`) and use the stored value for
-every later commitment and for the bridge of every refresh; neither re-reads
+every later commitment; neither re-reads
 `vtxo_exit_delta` from ark info for an existing channel. No wire field carries
 it. Cross-peer agreement is enforced at open by the **bridge cosign**: the
 `musig(A, S)` key-path sighash commits the bridge input's `nSequence`, so peers
@@ -1376,12 +1374,7 @@ force-close an established channel *after* the board transaction confirmed
 CSV and the bridge `nSequence` from the single pinned value rather than
 configuring them independently: the protocol re-verifies the bridge copy at
 every cosign, but a split between a peer's own two copies is caught by nothing
-until that first-HTLC force-close. A
-refresh MUST build the new bridge at the pinned value, and the server,
-reconstructing that bridge from `channel_id`, MUST use the channel's stored
-`exit_delta` rather than its current ark-info value; if the server's
-`vtxo_exit_delta` has since changed and it will not cosign at the pinned value,
-the refresh fails and the channel must be closed and reopened.
+until that first-HTLC force-close.
 
 **The channel timing profile is pinned at open.** At open both parties MUST
 record the pair `(pinned_exit_delta, channel_max_vtxo_exit_depth)`, where
@@ -1394,16 +1387,13 @@ timing parameters for an existing channel.
 
 Every timing decision for a backing scope binds to values fixed when that scope
 was issued: the absolute `expiry_height` and actual exit depth decoded from the
-VTXO itself, and the channel's pinned timing profile. A refresh is valid only if
-the decoded new VTXO has `exit_delta == pinned_exit_delta` and actual exit depth
-`<= channel_max_vtxo_exit_depth`; a configuration change cannot raise either
-bound for an existing channel. HTLC admission, invoice validation, the
-stop-forwarding threshold, refresh scheduling, and force-close scheduling MUST
+VTXO itself, and the channel's pinned timing profile; a configuration change
+cannot raise either bound for an existing channel. HTLC admission, invoice
+validation, the stop-forwarding threshold, and force-close scheduling MUST
 use those scope-fixed values together with the real chain height, across
 restarts. They MUST NOT recompute expiry as anchor/root height plus a current
 `vtxo_expiry_delta`, or substitute a current ark-info exit parameter or depth
-bound. A peer unable to issue or cosign a scope meeting the stored profile MUST
-refuse refresh, leaving the client to refresh earlier or force-close.
+bound.
 
 ## Refresh
 
@@ -1469,6 +1459,22 @@ invalid. For each affected channel, the server MUST identify exactly one current
 old backing; a stale backing, an unknown mapping, or two different current
 backings for the same channel is an admission failure, not something deferred to
 leaf cosigning or teleport.
+
+**The pinned timing profile governs the new scope.** A refresh is valid only
+if the decoded new VTXO has `exit_delta == pinned_exit_delta` and actual exit
+depth `<= channel_max_vtxo_exit_depth` ("The Ark channel type"): a channel
+VTXO issued by refresh is a round leaf, and the client MUST refuse a refresh
+whose issued leaf would exceed the pinned depth — a deeper exit chain would
+overrun the CLTV budget. The refresh MUST build the new bridge at the pinned
+`exit_delta`, and the server, reconstructing that bridge from `channel_id`,
+MUST use the channel's stored value rather than its current ark-info value;
+if the server's `vtxo_exit_delta` has since changed and it will not cosign at
+the pinned value, the refresh fails and the channel must be closed and
+reopened. A refresh reuses the pinned timing profile, so the channel's CLTV
+floor does not move, and refresh scheduling MUST use the scope-fixed values
+exactly as the core's timing decisions do. A peer unable to issue or cosign a
+scope meeting the stored profile MUST refuse refresh, leaving the client to
+refresh earlier or force-close.
 
 Accepting the participation and establishing its refresh gates are one
 admission decision: a participation is either accepted with a gate for every
