@@ -307,8 +307,11 @@ upgrade" specifies the flow.
 
 ### Channel setup
 
-The parties MUST negotiate the Ark channel type (see "The Ark channel type"),
-which exchanges the two ordinary BOLT-3 funding pubkeys. With the bridge built
+The parties MUST negotiate the channel type their operating profile
+designates ("Implementation profiles"; under the type extension, the Ark
+channel type), and the server MUST refuse to open a channel of any other
+type. Establishment exchanges the two ordinary BOLT-3 funding
+pubkeys. With the bridge built
 and cosigned, its output (`bridge_txid:0`) is given to the Lightning stack as the
 funding outpoint, and the parties run Lightning channel establishment
 (referenced) to exchange signatures on the initial commitment transaction, which
@@ -427,11 +430,14 @@ of these:
   `channel_max_vtxo_exit_depth` being pinned at open. This tightens ARK #5,
   which bounds only the *input* (at `max_vtxo_exit_depth − 1`) and so admits
   checkpointed outputs at depth `max_vtxo_exit_depth + 1` — an overshoot that
-  would overrun the pinned CLTV budget ("The Ark channel type").
+  would overrun the CLTV floor ("The force-close deadline"). Admission
+  SHOULD go further and leave **split headroom**: a resulting depth at most
+  `channel_max_vtxo_exit_depth − 2` keeps a worst-case (checkpointed)
+  downgrade split cosignable for the channel's whole life (see the depth
+  rules under "Downgrade: close into Ark balance").
 * **Runway.** The scope inherits the input's `expiry_height`, and the
   remaining runway (`expiry_height − real chain tip`) MUST exceed the party's
-  computed complete CLTV floor
-  (`2 * pinned_exit_delta + channel_max_vtxo_exit_depth + cltv_safety_margin`):
+  computed CLTV floor `F` ("The force-close deadline"):
   below it the channel opens already inside its close-or-exit discipline
   ("The force-close deadline"), and below the force-close margin,
   unable to beat the expiry sweep at all. The remedy is to refresh the input
@@ -441,7 +447,7 @@ of these:
 * **Pinned parameters.** `pinned_exit_delta` is the input VTXO's decoded
   `exit_delta` — the new VTXO inherits it, so the scope invariant
   `decoded exit_delta == pinned_exit_delta` holds from birth — and the bridge
-  `nSequence` and HTLC success-path CSV derive from it exactly as at the
+  `nSequence` derives from it exactly as at the
   open. A server unwilling to operate a channel at that value MUST refuse to
   cosign; the client's remedy is refresh first.
   `channel_max_vtxo_exit_depth` is pinned from the published
@@ -507,7 +513,6 @@ The Ark/Lightning boundary is drawn as follows.
 
 **Normative (Ark side):**
 
-* the channel is of the Ark channel type (see "The Ark channel type");
 * the channel VTXO output and the bridge transaction — exact construction and
   value (see "The channel VTXO and the bridge transaction");
 * that the **bridge** spends the channel VTXO output through the key path, signed
@@ -1008,7 +1013,7 @@ force-close (BOLT) then spends it.
    funding output with the closing transaction instead — no `to_self_delay`,
    no HTLCs; see "The close".)
 4. **Claim.** Once the commitment confirms, claim its outputs (`to_local`,
-   `to_remote`, and resolved HTLCs) per the Ark channel type's BOLT-3 rules
+   `to_remote`, and resolved HTLCs) per the channel's BOLT-3 rules
    (referenced).
 
 Unlike a `pubkey` exit (ARK #6), there is no VTXO-level `delayed-sign` claim; the
@@ -1038,44 +1043,52 @@ Reaching that point unilaterally takes, in series: the genesis exit chain (the
 VTXO's exit depth, at most the scope's pinned
 `channel_max_vtxo_exit_depth`, each level confirming), the bridge's
 `pinned_exit_delta` relative timelock, and the bridge's own confirmation, plus
-fee-bumping slack. The user MUST therefore begin a force-close at least
-`channel_max_vtxo_exit_depth + pinned_exit_delta` blocks — plus confirmation and
-fee-bumping slack for the genesis levels and the bridge — before that scope's
-fixed `expiry_height`. The deadline is the **bridge's** confirmation: the
-commitment confirms only after the bridge and, once the bridge has spent the VTXO
-output, is no longer bounded by `expiry_height` (above), so it does not enter this
-margin. The user SHOULD refresh, which resets `expiry_height`, well before that:
-the same exit-before-expiry discipline as any VTXO (ARK #6), with the bridge's
-`pinned_exit_delta` added to the margin.
+fee-bumping slack. Call that total the scope's **CLTV floor**:
 
-This interacts with HTLCs. A refresh quiesces the channel — which needs no
-*pending* (uncommitted) HTLC updates in flight — and **carries** any committed
-HTLCs across to the new scope, like a splice (see "The teleport protocol"), so a
-committed HTLC does not by itself block the refresh. What blocks it is an
-**unresponsive peer**: both quiescence and the teleport's `commitment_signed`
-exchange need the peer, so if it stops responding near the deadline the refresh
-cannot complete and the node must force-close unilaterally instead. The user
-MUST therefore stop offering new HTLCs on the channel, and refresh or
-force-close, once that scope's fixed `expiry_height − real_chain_height`
-falls to the **larger** of (a) the force-close margin above
-(`channel_max_vtxo_exit_depth + pinned_exit_delta` + slack, which gets the bridge
-confirmed) and (b) the full on-chain HTLC-resolution budget for any HTLC it must
-still drive (the `cltv_expiry_delta` budget of "The Ark channel type",
-`2 · pinned_exit_delta + channel_max_vtxo_exit_depth` + margin). This is a
-maximum, not a sum: budget (b) already contains the genesis-plus-bridge climb of
-(a) as its first `pinned_exit_delta + channel_max_vtxo_exit_depth`, then adds the
-success-path CSV's second `pinned_exit_delta` on the confirmed commitment — so
-(b) dominates whenever an in-flight HTLC must be resolved on-chain, while (a)
-governs only an idle channel. Adding the two would double-count the shared
-force-close prefix.
+    F = channel_max_vtxo_exit_depth + pinned_exit_delta + cltv_claim_slack
+
+— every relative timelock on the unilateral path plus the unroll distance to
+the commitment, where `cltv_claim_slack` is a configured safety margin
+covering the genesis, bridge, commitment, and HTLC second-stage confirmations
+and their fee-bumping lag under congestion. Every computation over `F` MUST
+use checked arithmetic, and an implementation MUST refuse to operate a
+channel whose `F` does not fit the `u16` `cltv_expiry_delta` fields that
+carry it. The user MUST begin a force-close at least `F` blocks before the
+scope's fixed `expiry_height`. The deadline is the **bridge's** confirmation:
+the commitment confirms only after the bridge and, once the bridge has spent
+the VTXO output, is no longer bounded by `expiry_height` (above), so it does
+not enter this margin.
+
+`F` is also the floor under **every per-HTLC CLTV decision**, because the
+Lightning stack was told the funding is confirmed and budgets none of the
+actualization path: an HTLC whose remaining budget is below `F` can expire
+before any on-chain claim of it is even *possible* — a deterministic loss,
+independent of who wins any subsequent race. A node MUST enforce
+`cltv_expiry − real_chain_height ≥ F` on every HTLC it accepts — which
+covers spontaneous (keysend) payments per-HTLC, with no blanket rule
+needed — MUST advertise at least `F` as the `min_final_cltv_expiry_delta`
+of invoices it issues, MUST apply at least `F` as its forwarding
+`cltv_expiry_delta` over channel hops, and MUST force-close while an
+in-flight HTLC it must still drive on-chain retains at least `F` of budget.
+
+The pre-expiry discipline therefore runs on **two thresholds**. At an
+earlier **cooperative lead** — separately derived, since `shutdown`, HTLC
+drain, and closing negotiation are unbounded in time — the user stops
+offering new HTLCs and initiates the close ("The close"). At the hard
+**force-close margin** (`F` blocks before `expiry_height`) the node MUST
+force-close unless a complete split registration is already potentially
+final ("Registration and the split response") — waiting on a cooperative
+settlement past that margin spends the bridge-confirmation budget itself.
+What blocks a timely cooperative resolution is an **unresponsive peer**;
+absent one, the node force-closes unilaterally.
 
 A channel carried too close to expiry — for example one an unresponsive peer
-prevents refreshing — can lose the entire VTXO to the sweep. This deadline is
+prevents settling — can lose the entire VTXO to the sweep. This deadline is
 the user's own discipline, not a forwarding restriction on the server: the
 server's expiry-sweep leaf *gains* the whole channel on a missed deadline (see
 "Security and trust notes"), so it has no aligned incentive to stop forwarding
 HTLCs onto a channel nearing expiry. The user cannot rely on it and MUST protect
-itself by refreshing in time.
+itself by closing or exiting in time.
 
 ## Messages
 
