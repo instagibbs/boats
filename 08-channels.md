@@ -77,7 +77,8 @@ distinguished only by its input's policy.
 This document is layered. The **core lifecycle** — the channel VTXO and its
 bridge, open by upgrade, operation, the cooperative close and its downgrade
 settlement, unilateral exit, and expiry — reads contiguously from here and
-is self-contained: together with an operating profile it fully specifies a
+is self-contained: together with an operating profile ("Implementation
+profiles") it fully specifies a
 working channel system on an unmodified Lightning implementation that
 exposes manual (application-supplied) funding and application-fed chain
 hooks. Two **extension**
@@ -1929,19 +1930,83 @@ watch set, gate, or scope record after a restart MUST leave that channel
 fail-closed rather than recreate an empty state or resume without
 reconciliation.
 
+## Implementation profiles
+
+A deployment operates this document at a declared **profile**: the set of
+layers it implements, plus the parameters the core leaves to designation.
+The peers of one Ark service run the same profile, and the layering contract
+("Layers") guarantees each profile below is complete as stated.
+
+### Profile: core-only (first release)
+
+The core lifecycle with no extensions. Its designations, and the obligations
+that stand in for the extensions' protections:
+
+* **Channel type.** The designated type is `zero_fee_commitments` (with
+  `static_remote_key`): v3/TRUC commitments and the single shared P2A anchor
+  put the whole force-close family under one fee model (CPFP over P2A,
+  ARK #6), and no `update_fee` runs against a funding that cannot be
+  re-signed. The server MUST refuse any other type ("Channel setup").
+* **Split headroom is mandatory.** The core's SHOULD ("Open by upgrade",
+  Depth) is a MUST here: without refresh, a channel VTXO too deep to split
+  has no cooperative settlement, ever — the user would be forced into an
+  on-chain unroll the server would happily have avoided by refreshing the
+  downgraded outputs in an ordinary round. Upgrade admission MUST bound the
+  resulting depth at `channel_max_vtxo_exit_depth − 2`. And because the
+  split's eligibility is checked against the server's **live**
+  `max_vtxo_exit_depth` (ARK #2) — which the pinned profile cannot
+  override — a server MUST NOT lower that bound below what any live
+  channel's split needs: it MUST refuse the configuration change or require
+  those channels closed first.
+* **Expiry is a treadmill.** A channel cannot outlive its backing's
+  `expiry_height` in place. The supported lifecycle is: downgrade at the
+  cooperative lead ("The force-close deadline"), refresh the resulting
+  `pubkey` VTXOs in an ordinary round, and re-open by upgrade. Clients
+  SHOULD schedule the downgrade proactively.
+* **HTLC exposure is bounded by policy, not by script.** Without the type
+  extension's success-path CSV, an expired HTLC's on-chain
+  timeout-versus-preimage contest is a fee race with no consensus-ordered
+  head start. The core's floor `F` removes the deterministic losses; the
+  residual race is bounded operationally — conservative per-HTLC value caps
+  and in-flight limits on channels the server forwards over, with the
+  forwarding `cltv_expiry_delta` at or above `F`. Forwarding is otherwise
+  unrestricted (payments between two users of one service require it), and
+  this exposure ends where the type extension is adopted.
+* **Known conformance deviations.** (i) The attestation's operation-identity
+  binding of `channel_id` (ARK #5) is not enforced; a tampered `channel_id`
+  is caught at partial-signature verification instead ("Messages"), and the
+  residual is a low-severity griefing vector requiring a man-in-the-middle.
+  (ii) A byte-identical duplicate cosign request may be re-signed with fresh
+  nonces rather than replayed-or-rejected (ARK #5): fresh-nonce re-signing
+  leaks nothing, and that rule's protection targets a client completing a
+  session twice, which a conforming client never does.
+
+### Profile: extended
+
+The core plus both extensions: the Ark channel type replaces the per-HTLC
+race exposure with the success-path CSV's ordered claims (raising the
+per-HTLC threshold to its budget), and refresh lifts the expiry treadmill.
+The intermediate profiles — the core plus exactly one extension — are
+coherent, since each extension stands alone on the core, but they are not
+deployment targets of the reference.
+
 ## Compatibility
 
 The channel work extends the protocol without disturbing existing flows.
 
-* **Additive messages.** The channel additions on the arkoor cosign request
-  (`channel_id` + `bridge_pub_nonce`), the leaf cosign request (the same
-  pair), and the round participation response are optional. A peer
-  that does not implement channels ignores them, and the board, arkoor, refresh,
-  and offboard flows are unchanged for non-channel VTXOs. The downgrade adds
-  no fields at all; the question of a channel-unaware server never arises for
-  it, since only a channel-aware server can have cosigned its
-  `channel-funding` input into existence.
-* **Channel support is a capability, not a default.** A channel open or refresh
+* **Additive messages.** The core's additions ride one arkoor cosign
+  exchange: `channel_id` + `bridge_pub_nonce` on the request, the server's
+  bridge nonce and partial signature on the response — all optional. A peer
+  that does not implement channels ignores them, and the board, arkoor,
+  round, and offboard flows are unchanged for non-channel VTXOs. The
+  downgrade adds no fields at all; the question of a channel-unaware server
+  never arises for it, since only a channel-aware server can have cosigned
+  its `channel-funding` input into existence. The refresh extension's
+  equally-optional additions (the leaf cosign request's pair, the round
+  participation response bound) are specified with that extension; the
+  teleport's messages live on the Lightning transport, not the Ark service.
+* **Channel support is a capability, not a default.** A channel open — or,
+  with the refresh extension, a refresh —
   requires a channel-aware server. An open (upgrade) fails safely against a
   channel-unaware server: the `channel-funding` destination policy itself is
   rejected as an unknown policy type (ARK #2), before anything is marked
