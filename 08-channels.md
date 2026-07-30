@@ -71,6 +71,23 @@ optional server liquidity bound (see "Refresh" and "Compatibility"). The
 downgrade split adds no fields at all — it is a plain ARK #5 request,
 distinguished only by its input's policy.
 
+### Layers
+
+This document is layered. The **core lifecycle** — the channel VTXO and its
+bridge, open by upgrade, operation, the cooperative close and its downgrade
+settlement, unilateral exit, and expiry — reads contiguously from here and
+is self-contained: together with an operating profile it fully specifies a
+working channel system on an unmodified Lightning implementation that
+exposes manual (application-supplied) funding and application-fed chain
+hooks. Two **extension**
+sections follow the core, and each builds only on what precedes it: "The
+Ark channel type" (a dedicated channel type whose HTLC success-path CSV
+makes forwarding safe against expired-HTLC races) and "Refresh" with "The
+teleport protocol" (in-place renewal of the channel's backing VTXO, lifting
+the core's expiry treadmill). A core-only implementation is complete and
+interoperates with itself; each extension adds negotiated capability on
+top.
+
 ### Actors and keys
 
 At the Ark layer the channel reuses the keys of ARK #0 and introduces none.
@@ -1070,14 +1087,17 @@ itself by refreshing in time.
 
 ## Messages
 
-Channels reuse the Ark messages of ARK #5 (arkoor) and ARK #4 (round); the
-sections below give the channel variant of each affected
-message in full — base fields as defined in its home document, with the
-channel-specific fields called out. Every channel-specific field is absent for
-a non-channel operation, and a peer that does not implement channels ignores it
-(see "Compatibility"); no other Ark message changes for channels, and channels
-add no new Ark RPC. (The refresh teleport adds messages on the Lightning
-transport, not the Ark service; see "The teleport protocol.")
+Channels reuse the Ark messages of ARK #5 (arkoor) and ARK #4 (round). The
+core changes exactly one RPC exchange — the arkoor cosign request and its
+response — given below in full: base fields as defined in the home document,
+with the channel-specific fields called out.
+Every channel-specific field is absent for a non-channel operation, and a
+peer that does not implement channels ignores it (see "Compatibility"); no
+other Ark message changes for the core, and channels add no new Ark RPC.
+The refresh extension's message variants — `leaf_vtxo_cosign` and the
+`submit_round_participation` response — are specified with that extension
+(see "Refresh"; the teleport itself adds messages on the Lightning
+transport, not the Ark service).
 
 ### `arkoor_cosign_request` (ARK #5)
 
@@ -1163,6 +1183,12 @@ spend of a `channel-funding` input. Retries follow the operation-identity
 rule unchanged.
 
 ## The Ark channel type
+
+*Extension. This section defines a dedicated channel type whose HTLC
+success-path CSV orders expired-HTLC claims in the offerer's favor. A
+core-only implementation does not negotiate it: its operating profile
+designates a stock channel type instead and restricts HTLC exposure by
+policy.*
 
 A channel on Ark is not a vanilla BOLT channel: the parties MUST negotiate a
 dedicated **Ark channel type**. It is not a registered BOLT feature — Ark-aware
@@ -1375,6 +1401,12 @@ bound. A peer unable to issue or cosign a scope meeting the stored profile MUST
 refuse refresh, leaving the client to refresh earlier or force-close.
 
 ## Refresh
+
+*Extension. This section and "The teleport protocol" define in-place renewal
+of a channel's backing VTXO. A core-only implementation omits them: a
+channel's backing keeps its issuance expiry, and the pre-expiry remedies are
+the downgrade — followed by an ordinary ARK #4 refresh of its outputs and a
+re-open — or unilateral exit.*
 
 A channel VTXO expires like any other, and its exit chain grows no shallower
 over time. **Refresh** replaces it with a fresh channel VTXO before expiry,
