@@ -170,8 +170,12 @@ NEW crate: `bark-channels` — the shared LDK harness (base rust-lightning
     confirmation-injection is the registration gate; no trusted-0conf, no
     message interception (codex F2); funding-unconfirmation fed only on a
     genuine deep anchor reorg — stock force-close accepted as fail-closed
-    (I-10); synthetic SCID tx-index allocated deterministically from the
-    bridge txid (peer-consistent, persisted, collision-checked) (I-10)
+    (I-10); synthetic SCID position: index derived from the bridge txid
+    (24-bit, ≥1) with a persisted per-node collision bump — node-local
+    uniqueness + restart stability are the hard requirements; peer
+    agreement is NOT required (old branch's sides never agreed and worked;
+    aliases carry all wire uses) and the channel is never announced (I-10;
+    spec paragraph owed by the restructure track)
   broadcaster capture: nothing spending a virtual funding outpoint is
     relayed; the co-op closing tx is committed DURABLY before the capture
     callback returns (LDK hands it over before any persisted event, and
