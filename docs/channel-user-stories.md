@@ -155,8 +155,8 @@ Stories apply to both user personas unless marked otherwise.
   known at admission.
 * ✅ As a server, forfeited state cannot beat me to the chain: a forfeit
   spends ahead of the bridge's `exit_delta` with no timelock, and my
-  forfeit-watch duty — surviving restarts — enforces it. ("The close",
-  after-the-forfeit; ARK #7)
+  forfeit-watch duty — surviving restarts — enforces it. ("Refresh", the
+  close and watch composition; ARK #7)
 * ✅ As a user, a server that broadcasts revoked channel state is punished
   exactly as in stock Lightning — BOLT-3 penalties, unchanged, including
   second-stage claims along the Ark exit path.
@@ -176,9 +176,11 @@ Each of these is a *cannot happen, because* claim, not a policy.
 * ✅ An expired HTLC resolves deterministically to the timeout side: only the
   success path carries the pinned `exit_delta` CSV — the timeout claim is
   baseline BOLT-3 and strictly leads any late preimage claim — and the
-  success-path delay is priced into the CLTV budget, with the
-  success-CSV-equals-pinned-`exit_delta` binding self-checked at board
-  cosign. ("The Ark channel type", HTLC success-path CSV)
+  success-path delay is priced into the CLTV budget. The
+  success-CSV-equals-pinned-`exit_delta` derivation is guarded by an
+  implementation self-check at the open cosign; the protocol itself
+  surfaces a divergence only at the first HTLC's commitment exchange.
+  ("The Ark channel type", HTLC success-path CSV)
 * ✅ Neither side's crash creates a window for the other: everything
   safety-critical is stated as an observable property that must survive a
   crash — close outcomes, teleport promotion, forfeit watching — and a party

@@ -1065,12 +1065,18 @@ Lightning stack was told the funding is confirmed and budgets none of the
 actualization path: an HTLC whose remaining budget is below `F` can expire
 before any on-chain claim of it is even *possible* — a deterministic loss,
 independent of who wins any subsequent race. A node MUST enforce
-`cltv_expiry − real_chain_height ≥ F` on every HTLC it accepts — which
-covers spontaneous (keysend) payments per-HTLC, with no blanket rule
-needed — MUST advertise at least `F` as the `min_final_cltv_expiry_delta`
-of invoices it issues, MUST apply at least `F` as its forwarding
-`cltv_expiry_delta` over channel hops, and MUST force-close while an
-in-flight HTLC it must still drive on-chain retains at least `F` of budget.
+`cltv_expiry − real_chain_height ≥ F` — the receiving channel's floor — on
+every HTLC it accepts, which covers spontaneous (keysend) payments
+per-HTLC, with no blanket rule needed. An invoice not bound to a single
+receiving channel MUST advertise at least the **maximum** `F` across the
+channels it could be paid over, so the budget holds wherever the payment
+lands. A forwarding node MUST require
+`incoming_cltv − outgoing_cltv ≥ F_in` — the **incoming** scope's floor,
+since that is the channel whose HTLC it must claim on-chain if the
+outgoing leg resolves late — or advertise a `cltv_expiry_delta` that
+dominates every incoming scope able to feed the hop. And a node MUST
+initiate a force-close no later than the point where an unresolved
+in-flight HTLC it must drive on-chain has exactly `F` of budget remaining.
 
 The pre-expiry discipline therefore runs on **two thresholds**. At an
 earlier **cooperative lead** — separately derived, since `shutdown`, HTLC
@@ -1107,8 +1113,8 @@ transport, not the Ark service).
 
 ### `arkoor_cosign_request` (ARK #5)
 
-The channel variant is the ARK #5 `arkoor_cosign_request` with the board
-variant's two fields added, carried on the part whose destination set includes
+The channel variant is the ARK #5 `arkoor_cosign_request` with two channel
+fields added, carried on the part whose destination set includes
 the `channel-funding` output; the server cosigns the transfer and the bridge in
 one exchange. A package MUST carry at most one part with these fields (exactly
 one `channel-funding` destination; "Open by upgrade").
@@ -1346,9 +1352,9 @@ the exit-delay CSV). The Ark-specific deviations are:
   the two share the genesis-plus-bridge prefix
   (`channel_max_vtxo_exit_depth + pinned_exit_delta`), and the budget adds
   the success-path CSV's second `pinned_exit_delta`, served on the confirmed
-  commitment. The per-HTLC threshold under this extension is therefore the
-  **larger** of the two — the budget whenever an in-flight HTLC must be
-  resolved on-chain, `F` alone for an idle channel — never their sum, which
+  commitment. The per-HTLC threshold under this extension is therefore
+  `max(F, budget)` — the budget is the active term exactly when it is the
+  larger, the two margins being set independently — never their sum, which
   would double-count the shared prefix.
 
   Every timing-profile calculation MUST use checked arithmetic in a type wider
@@ -1383,8 +1389,8 @@ nothing signed at establishment commits to the success CSV, and a divergence
 confined to it — one peer's success CSV drifting from its own bridge
 `nSequence` — stays hidden through a successful open and surfaces only at the
 first HTLC's commitment exchange, whose signatures fail to validate and
-force-close an established channel *after* the board transaction confirmed
-(the point of no return). An implementation MUST therefore derive the success
+force-close an established channel *after* the open's registration point of
+no return. An implementation MUST therefore derive the success
 CSV and the bridge `nSequence` from the single pinned value rather than
 configuring them independently: the protocol re-verifies the bridge copy at
 every cosign, but a split between a peer's own two copies is caught by nothing
@@ -1435,8 +1441,9 @@ next refresh also does what the upgrade deliberately does not: it resets the
 scope's expiry and depth, and it satisfies an arkoor-received input's refresh
 recommendation (ARK #5) in place, making the core's pre-upgrade round
 unnecessary. A channel too deep to split regains its cooperative settlement
-here — refresh first, resetting depth, then downgrade
-(refresh-then-downgrade) — so the core's split-headroom admission becomes a
+here: a client pursuing cooperative settlement of an over-depth channel
+MUST refresh first — resetting depth — then downgrade
+(refresh-then-downgrade); the core's split-headroom admission becomes a
 convenience rather than the only guarantee. A refresh quiesces the channel —
 needing no *pending* (uncommitted) HTLC updates in flight — and **carries**
 committed HTLCs across to the new scope, like a splice ("The teleport
@@ -1691,7 +1698,7 @@ holds for `channel_id` — the new bridge reuses the channel's existing funding 
 channel it knows (with a funding key it controls), it MUST NOT cosign. For a leaf
 whose policy is `channel-funding`, `channel_id` and `bridge_pub_nonce` MUST be
 present, and the server MUST NOT cosign such a leaf without also cosigning its
-bridge — the no-bridgeless-VTXO rule of the board cosign, above. The server
+bridge — the no-bridgeless-VTXO rule of the open cosign, above. The server
 also independently learns the channel from the forfeited input on the round
 participation and from `teleport_init`. It MUST ensure the refresh is a genuine,
 value-conserving re-pointing of the named channel — the channel's current backing
@@ -1957,7 +1964,15 @@ that stand in for the extensions' protections:
   `max_vtxo_exit_depth` (ARK #2) — which the pinned profile cannot
   override — a server MUST NOT lower that bound below what any live
   channel's split needs: it MUST refuse the configuration change or require
-  those channels closed first.
+  those channels closed first. The headroom bound presupposes
+  `max_vtxo_exit_depth ≥ 2`, which the server MUST enforce as a
+  configuration invariant.
+* **Anchor reorganizations fail closed.** The chain feed withdraws a virtual
+  funding confirmation only on a genuine (deep) reorganization of its
+  anchor — anchors are typically deeply confirmed by open time — and the
+  stock force-close that follows is the accepted disposition ("Trust
+  assumptions"); suspending and resuming an unconfirmed-anchor channel is
+  not attempted.
 * **Expiry is a treadmill.** A channel cannot outlive its backing's
   `expiry_height` in place. The supported lifecycle is: downgrade at the
   cooperative lead ("The force-close deadline"), refresh the resulting
