@@ -279,8 +279,15 @@ calibrating to the actual reviewer beats theorizing.
 **MR-0 — LDK release spike. ✅ DONE 2026-07-29 — ALL SIX ASSERTIONS GREEN
 on stock lightning 0.2.4; the releases-only posture is CONFIRMED, no escape
 hatch needed.** (bark-stage1 branch `ark8-channels-stage1`; scaffold
-`4c654346` + spike `84433678`; suite 6/6 in ~6s, stable serial and
-parallel, clippy-clean.) Key pins for later MRs: the funder PANICS on a
+`4c654346` + spike `84433678` + SCID-contract pins; suite **9/9** in ~6s,
+stable serial and parallel, clippy-clean. The three SCID pins: restart +
+identical re-feed keeps the SCID — structurally inert since assignment is
+gated on `funding_tx_confirmation_height == 0`; peers feeding different
+positions both reach ready and payments route — agreement not required;
+same position for two channels = synchronous duplicate-SCID assert.
+Reload facts for MR-2: `ChannelManagerReadArgs` never calls `chain::Watch`
+— each restored monitor is `watch_channel()`ed after read; reestablish
+converges unprompted after restart+reconnect.) Key pins for later MRs: the funder PANICS on a
 confirmed funding input with an empty witness (the presigned bridge always
 carries one; synthetic tests must too); a hand-rolled event pump MUST call
 `process_pending_htlc_forwards()`; zero-fee commitments never reach the
