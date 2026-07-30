@@ -79,7 +79,7 @@ Stories apply to both user personas unless marked otherwise.
 * ✅ As a user, I want HTLC time budgets that already account for my longer
   unilateral path (exit chain + bridge + second stage), so no in-flight HTLC
   can outlive my ability to enforce it on-chain. ("The Ark channel type",
-  `cltv_expiry_delta` budget; "The refresh / force-close deadline")
+  `cltv_expiry_delta` budget; "The force-close deadline")
 * 🧭 As a mobile user with no inbound capacity, I want the server to provision
   it **just in time** when a payment is already on the way — the server funds
   a new channel VTXO on the spot and the payment lands in it — so receiving
@@ -113,7 +113,7 @@ Stories apply to both user personas unless marked otherwise.
 * ✅ As a user, I want my wallet to stop offering new HTLCs and force the
   refresh-or-close decision while there is still enough runway to resolve
   everything on-chain — the deadline discipline is computed, not left to
-  judgment. ("The refresh / force-close deadline")
+  judgment. ("The force-close deadline")
 * 🧭 As a mobile user, I never want to *think* about expiry: my wallet
   refreshes opportunistically whenever it is online with margin to spare, and
   warns me out-of-band (push) if the deadline nears without a chance to act.
