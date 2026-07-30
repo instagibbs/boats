@@ -1328,14 +1328,27 @@ the exit-delay CSV). The Ark-specific deviations are:
   payment that carries *no* receiver-committed CLTV floor — a **spontaneous
   (keysend) payment**, which has no invoice `min_final_cltv_expiry_delta` — cannot
   be budgeted this way at all, so a receiver MUST reject a keysend HTLC on an Ark
-  channel (the reference fails it back). Keysend is therefore **unsupported** on
-  Ark channels until a per-channel floor can be enforced for it.
+  channel (the reference fails it back). Keysend is therefore **unsupported**
+  under this extension for now. The core's per-HTLC acceptance check ("The
+  force-close deadline") is the natural relaxation — applied against this
+  extension's larger floor it would budget keysend per-HTLC with no
+  advertisement at all — and adopting it here is future work, pending its own
+  review.
   `channel_max_vtxo_exit_depth`
   is also the upper bound the budget assumes on the **channel VTXO's own** exit
   depth — the number of genesis levels a force-close must climb: a channel VTXO
   is an upgrade output ("Open by upgrade"), and the client MUST refuse an
   upgrade whose resulting depth would exceed it ("Open by upgrade"), since a
   deeper exit chain would overrun the budget.
+
+  This budget **extends the core's floor** `F` ("The force-close deadline"):
+  the two share the genesis-plus-bridge prefix
+  (`channel_max_vtxo_exit_depth + pinned_exit_delta`), and the budget adds
+  the success-path CSV's second `pinned_exit_delta`, served on the confirmed
+  commitment. The per-HTLC threshold under this extension is therefore the
+  **larger** of the two — the budget whenever an in-flight HTLC must be
+  resolved on-chain, `F` alone for an idle channel — never their sum, which
+  would double-count the shared prefix.
 
   Every timing-profile calculation MUST use checked arithmetic in a type wider
   than its encoded fields. BOLT's channel `cltv_expiry_delta` is a `u16`, so the
@@ -1407,7 +1420,44 @@ A channel VTXO expires like any other, and its exit chain grows no shallower
 over time. **Refresh** replaces it with a fresh channel VTXO before expiry,
 resetting both, while preserving the channel and its balance. It is a round
 (ARK #4): the old channel VTXO is forfeited and a new `channel-funding` VTXO
-is issued as a round leaf.
+is issued as a round leaf. The new scope's chain anchor is the round
+transaction (the tree root), and the virtual funding re-anchors there on
+promotion ("Trust assumptions").
+
+Refresh is the third seam where a channel touches the generic Ark flows —
+alongside the core's upgrade and downgrade — and it restores the in-place
+escape the core lacks: with this extension the user SHOULD refresh, which
+resets `expiry_height`, well before the core's force-close deadline, and the
+cooperative lead of "The force-close deadline" prefers a refresh over a
+close. Like the cooperative close, refresh requires a responsive server. The
+next refresh also does what the upgrade deliberately does not: it resets the
+scope's expiry and depth, and it satisfies an arkoor-received input's refresh
+recommendation (ARK #5) in place, making the core's pre-upgrade round
+unnecessary. A channel too deep to split regains its cooperative settlement
+here — refresh first, resetting depth, then downgrade
+(refresh-then-downgrade) — so the core's split-headroom admission becomes a
+convenience rather than the only guarantee. A refresh quiesces the channel —
+needing no *pending* (uncommitted) HTLC updates in flight — and **carries**
+committed HTLCs across to the new scope, like a splice ("The teleport
+protocol"), so a committed HTLC does not by itself block a refresh; what
+blocks it is an unresponsive peer, in which case the node force-closes per
+the core's deadline.
+
+Refresh also composes with the core's close and watch machinery, with the
+**forfeit** in the split's role. Until a refresh's forfeit (as until the
+split's registration), the user can settle a closed channel without the
+server; once the VTXO is forfeited in a refresh round (as once the split is
+registered), the closing transaction and the commitment can no longer reach
+the chain — the retained forfeit spends the channel VTXO output with no
+timelock, ahead of the bridge's `exit_delta`, and the teleport's promotion
+retires the old scope by the same argument — and the enforcing watch is the
+forfeit-watch duty (ARK #4), the split-response watch's counterpart. The
+upgrade's parent-exit duty ("Registration and the parent-exit response")
+does not end at a refresh: after its forfeit, the forfeited output can be
+actualized for the forfeit claim only through the same retained
+transactions — the duty's conclusive-spend condition reads "spent by the
+retained transfer or a forfeit-driven actualization" — and discarding them
+at forfeit would let the input's leaf outrace the forfeit.
 
 ### Reused from ARK #4
 
