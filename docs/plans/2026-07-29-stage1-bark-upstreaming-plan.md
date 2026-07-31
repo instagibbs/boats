@@ -495,8 +495,8 @@ property/operator docs, **W** = profile waiver.
 | PV-8 | MR-1 (field) + MR-2 (advertise-when-enabled) + MR-3 (client refusal) | T |
 | PV-9 | MR-1 | T (pre-channel decoder rejects 0x08) |
 | PV-10 | MR-1 (optionality) + MR-2 (suite green, subsystem off/on) | T |
-| BR-1..2, 5..6, 9 | MR-1 | T (construction; BR-9 both-sides determinism) |
-| BR-3, 4, 8 | MR-1 (construction/schema primitive only) + MR-2 (runtime: pinned-source/storage/never-reread-live, negotiated-amount equality) | T |
+| BR-1..2, 5..7, 9 | MR-1 | T (construction; BR-7 delay-only-on-bridge-nSequence; BR-9 both-sides determinism) |
+| BR-3, 4, 8 | MR-1 (construction/schema primitive only) + MR-2 (server runtime: pinned-source/storage/never-reread-live, negotiated-amount equality) + MR-3 (client stores + reuses the pinned value) | T |
 | BR-10, 11 | MR-3 | T (exit e2e; bridge persisted + crash-resume) |
 | BR-12, 13 | MR-2 | D (MAY: stage-1 server keeps close outcome, not the bridge) |
 | BR-14 | MR-2 | S+T (ordinary LDK keys; registry keyed by channel_id) |
@@ -507,7 +507,7 @@ property/operator docs, **W** = profile waiver.
 | OP-8..13 | MR-3 | T (ordering, checkpoints, crash matrix) |
 | OP-14..16 | MR-2 + MR-3 | T (floor/depth/pin, both views) |
 | OP-18..22 | MR-0→MR-2 harness | T (OP-22 restart e2e in MR-2/MR-3) |
-| OP-23..28 | MR-1 (wire shape / schema primitive only) + MR-2 (runtime: OP-23 identifier lookup, OP-24 at-most-one-part admission, OP-25/26 equalities + tamper vectors) | T |
+| OP-23..28 | MR-1 (wire shape / schema primitive only) + MR-2 (server runtime: OP-23 identifier lookup, OP-24 at-most-one-part admission, OP-25/26 equalities + tamper vectors) + MR-3 (client runtime: OP-27 fresh nonces on retry) | T |
 | OP-29 | — | W (parked; candidate upstream issue) |
 | RG-1..5 | MR-2 | S (upstream registration) + T (all-or-nothing, idempotent re-upload, crash) |
 | RG-6..8 | MR-2 (gate) + MR-3 (not-ready-before-registration e2e) | T |

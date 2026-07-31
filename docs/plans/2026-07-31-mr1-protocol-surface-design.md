@@ -10,28 +10,54 @@ shape), OP-28(note) — see §5 for the construction-primitive-only scoping.
 
 ## 1. Scope and the (narrowed) inertness property
 
-Types, construction, wire shape — **and the minimum admission gate that
-makes decoding the new policy safe**. The G0/G1 reviews established that
-"nothing creates it" is false without an explicit gate: once `0x08`
-decodes, the *generic* arkoor path (and the shared Lightning pay /
-receive-claim validator that reuses it) would accept a `channel-funding`
-**destination** and mint a bridgeless channel VTXO — marking the input
-spent before signing — because the shared validator gates only the *input*
-policy, and the builder copies arbitrary destination policies through
-(`lib/src/arkoor/mod.rs:415`, `server/src/arkoor.rs:36,122`,
-`server/src/ln/mod.rs:79,735`). A bridgeless `channel-funding` VTXO
-violates the spec's no-bridgeless rule (08-channels.md core), so MR-1 MUST
-foreclose it.
+Types, construction, wire shape — **and a structural admission invariant
+that makes decoding the new policy safe**. The three G1 review rounds
+established that a scattered "reject at validator X" approach is
+whack-a-mole: bark has no single input/output admission chokepoint, so each
+round surfaced another path that bypassed the last patch (direct arkoor →
+Lightning-pay → delegated round participation → round outputs). The fix is
+not another patch site but an invariant enforced fail-closed at each
+subsystem's *construction* mechanism:
+
+> **A `channel-funding` VTXO may be created or spent only through an
+> explicitly authorized construction.** Enforced at the point each
+> mechanism is shared by all its callers, defaulting to refusal.
+
+The mechanisms, and where the invariant lands:
+- **ArkoorBuilder** (`lib/src/arkoor/mod.rs`) — the constructor gains a
+  required `ChannelAuthorization` argument (`{ None, UpgradeOutput,
+  DowngradeInput }`) and refuses to build a `channel-funding` *destination*
+  unless it is `UpgradeOutput`, or spend a `channel-funding` *input* unless
+  it is `DowngradeInput`. Because *every* arkoor caller — direct arkoor,
+  Lightning-pay, Lightning-receive-claim, Lightning-revocation — constructs
+  through this one builder, this single required-parameter change closes the
+  whole arkoor perimeter at the type level: a future new caller cannot
+  compile without consciously choosing an authorization, and only two values
+  authorize anything. MR-1 passes `None` at every existing call site.
+- **Round tree construction** (`server/src/round/mod.rs`) — refuse a
+  `channel-funding` round *output* (leaf) and a `channel-funding` round
+  *input* (forfeit), enforced in the shared `validate_payment_amounts`
+  reached by *both* the self-signed and delegated participation paths.
+  Unconditional in stage 1: round issuance/forfeit of a channel VTXO exists
+  only under the refresh extension, which is out of scope, so there is no
+  stage-1 authorization to grant.
+- **Offboard input validation** (`server/src/offboards.rs`) — refuse a
+  `channel-funding` input (a channel VTXO reaches an on-chain exit only via
+  downgrade-then-offboard, never a direct offboard).
+- **Not gated here, deliberately**: the bridge spends the channel VTXO by
+  MuSig2 *key path* (`lib/src/channel.rs`, §3), not through any of these
+  builders — it is the presigned unilateral path and must stay always-valid.
 
 The honest inertness claim is therefore: **previously valid non-channel
 flows are byte/transaction-identical after this MR; every channel-shaped
-request (a `channel-funding` destination anywhere, or a `channel-funding`
-input in any generic consumer) is rejected before any DB write, output
-creation, or spent-state mutation.** Nothing yet *authorizes* a
-channel-funding destination — the upgrade admission path (MR-2, captaind
-server) and the downgrade split (MR-4, close) add the only two authorized
-entry points; until then the gate refuses all of them. `supports_channels`
-stays `false`.
+construction (a `channel-funding` output or input, on any path) is refused
+before any DB write, output creation, or spent-state mutation.** The two
+authorized entry points arrive later — the upgrade passes `UpgradeOutput`
+(MR-2, captaind server), the downgrade passes `DowngradeInput` after
+verifying the sanctioned split (MR-4, close). Neither exists yet, so MR-1
+refuses universally; the downgrade adding its opt-in is not a carve-out in a
+shared refusal but simply supplying a token the builder was always designed
+to require. `supports_channels` stays `false`.
 
 Not fully inert, and the note no longer claims otherwise: adding a public
 `VtxoPolicy` variant and public proto/struct fields is a source-level API
@@ -45,7 +71,7 @@ checks, registration gating, watches, any captaind/bark runtime, the
 ark-info advertisement *logic*, the attestation `channel_id` binding
 (recorded first-release profile deviation).
 
-## 2. The policy and the admission gate
+## 2. The policy and the admission invariant
 
 ### 2a. Policy type (`lib/src/vtxo/policy/mod.rs`, `lib/src/vtxo/mod.rs`)
 
@@ -74,36 +100,43 @@ ark-info advertisement *logic*, the attestation `channel_id` binding
   **no** user exit leaf (PV-1..3). Pinned by a byte-equality test against
   a board funding output built from the same keys/expiry (PV-2).
 
-### 2b. The admission gate (the one behavior this MR adds)
+### 2b. The admission invariant (the one behavior this MR adds)
 
-The gate lives in the **one shared pre-builder validator**,
-`validate_cosign_request` (`server/src/arkoor.rs:57`), which is the common
-chokepoint of all three generic cosign modes — direct arkoor
-(`cosign_oor`), Lightning-pay, and Lightning-receive-claim
-(`server/src/ln/mod.rs:135,794`). Placing BOTH gates there — before builder
-construction, before `execute_vtxo_tree_update`, before the `vtxos_in_flux`
-spent-mark, and (critically for receive-claim) before its preimage is
-durably settled (`ln/mod.rs:797`) — is what makes one gate cover every
-path. (G1-re-review-F1: the earlier draft put the input check only in
-`cosign_oor`, which Lightning-pay bypasses via `set_vtxos` → builder,
-letting a crafted LN-pay spend a `ChannelFunding` input into an HTLC output.
-Builder construction does NOT enforce `is_arkoor_compatible`
-(`lib/src/arkoor/mod.rs:1132,1340`), so the shared validator is the only
-safe chokepoint.)
+Enforced fail-closed at each subsystem's construction mechanism (§1):
 
-- **Destination gate**: `validate_cosign_request` MUST reject any
-  `ChannelFunding` destination — normal or isolated (the builder copies
-  supplied policies into both, `arkoor/mod.rs:427,544`) — with a distinct
-  `badarg`.
-- **Input gate**: `validate_cosign_request` MUST reject a `ChannelFunding`
-  *input* in every unauthorized mode. Also mirror the refusal in the
-  non-arkoor consumers that don't route through this validator: round-input
-  (`server/src/round/mod.rs:313`) and offboard
-  (`server/src/offboards.rs:187`) admission (both currently accept policies
-  generically).
-- Client-side **destination** eligibility (`bark/src/arkoor.rs:77-82`)
-  refuses too (input *selection* on the client is policy-agnostic today;
-  this is a destination filter, not an input one).
+- **ArkoorBuilder** (`lib/src/arkoor/mod.rs`): the constructor(s)
+  (`new`/`new_with_checkpoint`/`new_isolate_dust` ~1044-1137 and the
+  `ArkoorPackageBuilder`) take a required `ChannelAuthorization` and refuse
+  a `channel-funding` destination — normal or isolated, since the builder
+  copies supplied policies into both (`arkoor/mod.rs:427,544`) — unless it
+  is `UpgradeOutput`, and refuse a `channel-funding` input unless it is
+  `DowngradeInput`. This single type-level change covers every arkoor
+  caller at once: direct arkoor (`cosign_oor`), Lightning-pay,
+  Lightning-receive-claim, and Lightning-revocation all construct here
+  (verified: `server/src/arkoor.rs`, `server/src/ln/mod.rs:135,794`,
+  revocation). The builder does NOT enforce `is_arkoor_compatible` today
+  (`arkoor/mod.rs:1132,1340`) — the required parameter is what forces the
+  decision at every call site. MR-1 passes `None` everywhere.
+  (G1 history: three rounds of "reject at validator X" each missed a
+  sibling path — Lightning-pay bypassing a `cosign_oor`-only check, then the
+  delegated round path — which is why the invariant moves into the builder
+  itself rather than its callers.)
+- **Round** (`server/src/round/mod.rs`): refuse a `channel-funding` output
+  (leaf) and input (forfeit) in the shared `validate_payment_amounts`,
+  reached by BOTH self-signed and delegated participation (the delegated
+  path at ~1836 does only policy-agnostic `check_spendable` and was the
+  round-2 bypass). Unconditional in stage 1 — no round authorization exists
+  until the refresh extension.
+- **Offboard** (`server/src/offboards.rs`): refuse a `channel-funding`
+  input.
+- **Client** (`bark/src/arkoor.rs`): the same builder parameter applies —
+  the client's own downgrade (MR-4) is the one place it will pass
+  `DowngradeInput`; MR-1 passes `None`, so the client cannot build a
+  channel-shaped arkoor either.
+
+Every refusal is before any DB write, output creation, or spent-state
+mutation — and, for receive-claim, before its preimage is durably settled
+(`ln/mod.rs:797`).
 
 ### 2c. Forced-match inventory (compiler-enforced; each arm is the safe one)
 
@@ -198,28 +231,34 @@ Tests (upstream style; unit in-file, vectors in
 | bridge shape + `verify_tx` (BR-1..6, PV-11) | field asserts + consensus `verify` of the funding-input spend |
 | determinism (BR-9) | two constructions byte-identical; pinned txid vector |
 | sighash + MuSig2 round-trip (BR-15/17) | sign both halves, aggregate, assert **one 64-byte DEFAULT witness**, schnorr-verify vs the tweaked output key; **reject a corrupted partial**; **funding-key-order independence** |
-| **destination gate** (the new behavior): direct arkoor AND shared Lightning-pay both reject a `ChannelFunding` destination **before any DB/output/spent-state mutation** | server unit/integration |
-| generic **input** refusal (arkoor/round/offboard) | server unit |
-| proto optionality + pair preservation (PV-10, OP-23..24 shape) | convert round-trips ±channel fields, and through `set_vtxos`/`convert_vtxo` |
-| pre-channel decoder rejects `0x08` (PV-9) | assert the policy decoder (`decode_vtxo_policy`) errors on a `0x08` blob — the structural unknown-tag rejection at `vtxo/mod.rs:1084` — i.e. a channel VTXO cannot be misread as a non-channel one; plus unknown proto fields skipped (prost 0.14 skips-not-preserves) |
+| **builder invariant — destination** (the new behavior): a `ChannelFunding` destination is refused with `ChannelAuthorization::None` on EACH arkoor caller — direct arkoor, Lightning-pay, Lightning-receive-claim (before its preimage settle), Lightning-revocation — **before any DB/output/spent-state mutation** | server unit/integration, one per caller |
+| **builder invariant — input**: a `ChannelFunding` input is refused on each of those callers with `None` — explicitly including the **Lightning-pay input case** (the round-1 bypass) | server unit/integration |
+| **round refusal — both sub-paths**: a `ChannelFunding` round output (leaf) and input (forfeit) refused via shared `validate_payment_amounts`, tested on BOTH self-signed AND **delegated** participation (the round-2 bypass) | server unit |
+| **offboard refusal**: a `ChannelFunding` offboard input refused | server unit |
+| proto optionality + pair preservation (PV-10, OP-23..24 shape) | convert round-trips ±channel fields, and through `set_vtxos`/`convert_vtxo`/`with_vtxo` |
+| decoder-compat for `0x08` (PV-9) | PV-9 (a pre-channel decoder rejects unknown tags) is a property of the BASELINE `decode_vtxo_policy` wildcard-error arm (`vtxo/mod.rs:1088`), **structurally verified against `ea33bbf4`** — it cannot be a post-MR-1 test, since MR-1 adds the `0x08` *accept* arm. The MR-1 test is the separate builder-invariant refusal above (a decodable policy still cannot be minted/spent); plus unknown proto fields skipped (prost 0.14 skips-not-preserves) |
 
 Plus whole-workspace `cargo check --all --tests --examples` green, the
 opener's release-contract suite untouched and green.
 
 ## 6. Commit plan (each builds workspace-wide)
 
-Decoding `0x08` and the admission gate MUST land in the **same commit**
-(G1-re-review): the moment the policy is decodable, the shared validator
+Decoding `0x08` and the admission invariant MUST land in the **same
+commit**: the moment the policy is decodable, every construction mechanism
 must already refuse it, or the intermediate tree has the very bypass this
-MR closes. The compiler-forced refusal arms (§2c) land with the enum in
-that same commit for the same reason.
+MR closes. The `ChannelAuthorization` builder parameter is compiler-forcing
+— it touches every arkoor call site atomically — which is the point (a
+caller cannot exist without choosing an authorization); the forced-match
+policy arms (§2c) land in the same commit for the same reason.
 
-1. `lib, server: the channel-funding VTXO policy and its admission gate` —
-   policy type + taproot (combine_keys+cosign_taproot) + encoding + the
-   full forced-match inventory (incl. m0021) + the shared-validator
-   destination & input gates + the round/offboard input refusals + the
-   client destination filter + policy/vector tests + the before-mutation
-   gate tests for direct arkoor, Lightning-pay, and receive-claim.
+1. `lib, server: the channel-funding VTXO policy and its admission
+   invariant` — policy type + taproot (combine_keys+cosign_taproot) +
+   encoding + the full forced-match inventory (incl. m0021) + the
+   `ChannelAuthorization` builder parameter (all callers pass `None`) + the
+   round `validate_payment_amounts` refusal (both sub-paths) + the offboard
+   input refusal + policy/vector tests + the before-mutation refusal tests
+   per arkoor caller (incl. the Lightning-pay input case) and both round
+   sub-paths and offboard.
 2. `lib: the presigned bridge transaction and its cosign helpers` —
    `channel.rs` + bridge/sighash/musig + `verify_tx` and the sign tests.
 3. `server-rpc, bark: optional channel fields on the arkoor cosign
