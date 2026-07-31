@@ -28,9 +28,10 @@ flows are byte/transaction-identical after this MR; every channel-shaped
 request (a `channel-funding` destination anywhere, or a `channel-funding`
 input in any generic consumer) is rejected before any DB write, output
 creation, or spent-state mutation.** Nothing yet *authorizes* a
-channel-funding destination — the upgrade admission path (MR-3, server)
-and the downgrade split (MR-5) add the only two authorized entry points;
-until then the gate refuses all of them. `supports_channels` stays `false`.
+channel-funding destination — the upgrade admission path (MR-2, captaind
+server) and the downgrade split (MR-4, close) add the only two authorized
+entry points; until then the gate refuses all of them. `supports_channels`
+stays `false`.
 
 Not fully inert, and the note no longer claims otherwise: adding a public
 `VtxoPolicy` variant and public proto/struct fields is a source-level API
@@ -75,21 +76,34 @@ ark-info advertisement *logic*, the attestation `channel_id` binding
 
 ### 2b. The admission gate (the one behavior this MR adds)
 
-- **Destination gate**: the shared pre-builder validator
-  (`validate_cosign_request` / `cosign_oor_with_builder` in
-  `server/src/arkoor.rs`, reached by direct arkoor AND
-  `server/src/ln/mod.rs`'s pay/receive-claim) MUST reject any
-  `ChannelFunding` destination — normal or isolated — before the
-  `execute_vtxo_tree_update` write and before the `vtxos_in_flux`
-  spent-mark. Refuse with a distinct `badarg`.
-- **Input gate**: generic cosign input eligibility
-  (`server/src/arkoor.rs:150-152`) already rejects non-`Pubkey` inputs, so
-  a `ChannelFunding` input is refused there; add an explicit arm + comment
-  so the refusal is intentional, not incidental, and mirror the check in
-  round-input (`server/src/round/mod.rs:313`) and offboard
+The gate lives in the **one shared pre-builder validator**,
+`validate_cosign_request` (`server/src/arkoor.rs:57`), which is the common
+chokepoint of all three generic cosign modes — direct arkoor
+(`cosign_oor`), Lightning-pay, and Lightning-receive-claim
+(`server/src/ln/mod.rs:135,794`). Placing BOTH gates there — before builder
+construction, before `execute_vtxo_tree_update`, before the `vtxos_in_flux`
+spent-mark, and (critically for receive-claim) before its preimage is
+durably settled (`ln/mod.rs:797`) — is what makes one gate cover every
+path. (G1-re-review-F1: the earlier draft put the input check only in
+`cosign_oor`, which Lightning-pay bypasses via `set_vtxos` → builder,
+letting a crafted LN-pay spend a `ChannelFunding` input into an HTLC output.
+Builder construction does NOT enforce `is_arkoor_compatible`
+(`lib/src/arkoor/mod.rs:1132,1340`), so the shared validator is the only
+safe chokepoint.)
+
+- **Destination gate**: `validate_cosign_request` MUST reject any
+  `ChannelFunding` destination — normal or isolated (the builder copies
+  supplied policies into both, `arkoor/mod.rs:427,544`) — with a distinct
+  `badarg`.
+- **Input gate**: `validate_cosign_request` MUST reject a `ChannelFunding`
+  *input* in every unauthorized mode. Also mirror the refusal in the
+  non-arkoor consumers that don't route through this validator: round-input
+  (`server/src/round/mod.rs:313`) and offboard
   (`server/src/offboards.rs:187`) admission (both currently accept policies
   generically).
-- Client-side send eligibility (`bark/src/arkoor.rs:77-82`) refuses too.
+- Client-side **destination** eligibility (`bark/src/arkoor.rs:77-82`)
+  refuses too (input *selection* on the client is policy-agnostic today;
+  this is a destination filter, not an input one).
 
 ### 2c. Forced-match inventory (compiler-enforced; each arm is the safe one)
 
@@ -162,8 +176,9 @@ drop half a pair. Use grouped carriers instead:
 ## 5. Tests and the construction-primitive scoping (G1-F5)
 
 These matrix IDs are dischargeable HERE only as **construction/schema
-primitives**; their runtime obligations stay owned by MR-3/MR-5 and the
-matrix §7 row is labeled accordingly:
+primitives**; their runtime obligations stay owned by the captaind MR
+(MR-2, server admission) and the bark MR (MR-3, client), and the plan's §7
+table is labeled accordingly:
 - BR-3/BR-8 (source/storage/never-reread-live), BR-4 (negotiated-amount
   equality), BR-7 (commitment-input half), BR-14 (key exchange/registry),
   BR-16 (commitment signing), BR-15/BR-17 (once-at-open / session
@@ -186,22 +201,28 @@ Tests (upstream style; unit in-file, vectors in
 | **destination gate** (the new behavior): direct arkoor AND shared Lightning-pay both reject a `ChannelFunding` destination **before any DB/output/spent-state mutation** | server unit/integration |
 | generic **input** refusal (arkoor/round/offboard) | server unit |
 | proto optionality + pair preservation (PV-10, OP-23..24 shape) | convert round-trips ±channel fields, and through `set_vtxos`/`convert_vtxo` |
-| legacy decoder posture (PV-9) | old-shape protobuf still round-trips; unknown proto fields skipped (prost 0.14 skips-not-preserves) |
+| pre-channel decoder rejects `0x08` (PV-9) | assert the policy decoder (`decode_vtxo_policy`) errors on a `0x08` blob — the structural unknown-tag rejection at `vtxo/mod.rs:1084` — i.e. a channel VTXO cannot be misread as a non-channel one; plus unknown proto fields skipped (prost 0.14 skips-not-preserves) |
 
 Plus whole-workspace `cargo check --all --tests --examples` green, the
 opener's release-contract suite untouched and green.
 
 ## 6. Commit plan (each builds workspace-wide)
 
-1. `lib: add the channel-funding VTXO policy` — policy + taproot
-   (combine_keys+cosign_taproot) + the full forced-match inventory
-   (incl. m0021) + encoding + policy/vector tests.
+Decoding `0x08` and the admission gate MUST land in the **same commit**
+(G1-re-review): the moment the policy is decodable, the shared validator
+must already refuse it, or the intermediate tree has the very bypass this
+MR closes. The compiler-forced refusal arms (§2c) land with the enum in
+that same commit for the same reason.
+
+1. `lib, server: the channel-funding VTXO policy and its admission gate` —
+   policy type + taproot (combine_keys+cosign_taproot) + encoding + the
+   full forced-match inventory (incl. m0021) + the shared-validator
+   destination & input gates + the round/offboard input refusals + the
+   client destination filter + policy/vector tests + the before-mutation
+   gate tests for direct arkoor, Lightning-pay, and receive-claim.
 2. `lib: the presigned bridge transaction and its cosign helpers` —
    `channel.rs` + bridge/sighash/musig + `verify_tx` and the sign tests.
-3. `server: reject channel-funding in generic cosign, round, and offboard
-   admission` — the destination + input gates + before-mutation tests.
-   (The one behavior commit; isolable and independently reviewable.)
-4. `server-rpc, bark: optional channel fields on the arkoor cosign
+3. `server-rpc, bark: optional channel fields on the arkoor cosign
    exchange; supports_channels in ark info` — proto + grouped carriers +
    convert (half-present rejection) + package-preservation tests + server
    `ArkInfo` construction (still `false`) + bark-json field + its
@@ -210,8 +231,8 @@ opener's release-contract suite untouched and green.
 ## 7. Open items for review
 
 1. Module name `lib/src/channel.rs` (board.rs precedent argues top-level).
-2. Whether commit 3 (the gate) should instead fold into the captaind MR
-   (MR-3) — decided NO: decoding `0x08` without the gate is unsafe, so the
-   gate ships in the same MR that makes the policy decodable.
+2. Whether the gate should instead defer to the captaind MR (MR-2) —
+   decided NO: decoding `0x08` without the gate is unsafe, so the gate
+   ships in the same *commit* that makes the policy decodable (commit 1).
 3. `optional` proto3 presence vs bare fields — `optional` for explicit
    presence (matches `max_vtxo_amount`).

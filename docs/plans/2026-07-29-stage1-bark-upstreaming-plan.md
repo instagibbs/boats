@@ -491,11 +491,12 @@ property/operator docs, **W** = profile waiver.
 |---|---|---|
 | IB-1..7 | MR-2 (upgrade path), MR-4 (split path), MR-5 (bypass vectors) | S+T (IB-3 exiting-at-cosign gets its own test) |
 | PV-1..5, 7, 11 | MR-1 | T |
-| PV-6 | MR-2 (generic refusal) + MR-4 (sanctioned split) | T |
+| PV-6 | MR-1 (the shared-validator refusal gate, input + destination) + MR-2 (upgrade auth) + MR-4 (split auth) | T (MR-1: reject before mutation on all 3 generic paths) |
 | PV-8 | MR-1 (field) + MR-2 (advertise-when-enabled) + MR-3 (client refusal) | T |
 | PV-9 | MR-1 | T (pre-channel decoder rejects 0x08) |
 | PV-10 | MR-1 (optionality) + MR-2 (suite green, subsystem off/on) | T |
-| BR-1..9 | MR-1 | T (BR-9 both-sides determinism) |
+| BR-1..2, 5..6, 9 | MR-1 | T (construction; BR-9 both-sides determinism) |
+| BR-3, 4, 8 | MR-1 (construction/schema primitive only) + MR-2 (runtime: pinned-source/storage/never-reread-live, negotiated-amount equality) | T |
 | BR-10, 11 | MR-3 | T (exit e2e; bridge persisted + crash-resume) |
 | BR-12, 13 | MR-2 | D (MAY: stage-1 server keeps close outcome, not the bridge) |
 | BR-14 | MR-2 | S+T (ordinary LDK keys; registry keyed by channel_id) |
@@ -506,7 +507,7 @@ property/operator docs, **W** = profile waiver.
 | OP-8..13 | MR-3 | T (ordering, checkpoints, crash matrix) |
 | OP-14..16 | MR-2 + MR-3 | T (floor/depth/pin, both views) |
 | OP-18..22 | MR-0→MR-2 harness | T (OP-22 restart e2e in MR-2/MR-3) |
-| OP-23..28 | MR-1 (proto) + MR-2 (admission + tamper vectors) | T |
+| OP-23..28 | MR-1 (wire shape / schema primitive only) + MR-2 (runtime: OP-23 identifier lookup, OP-24 at-most-one-part admission, OP-25/26 equalities + tamper vectors) | T |
 | OP-29 | — | W (parked; candidate upstream issue) |
 | RG-1..5 | MR-2 | S (upstream registration) + T (all-or-nothing, idempotent re-upload, crash) |
 | RG-6..8 | MR-2 (gate) + MR-3 (not-ready-before-registration e2e) | T |
