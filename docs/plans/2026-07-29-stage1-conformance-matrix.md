@@ -1,16 +1,30 @@
 # ARK #8 channels — stage-1 conformance matrix
 
-**Purpose**: the normative checklist a stage-1 implementation (upgrade/downgrade
+> **READ FIRST (2026-07-31): this matrix is a POINT-IN-TIME extraction, not
+> the live normative source.** It was extracted against `9f1c7fd`
+> (`phase4_deletions`), *before* the spec restructure. Since then
+> `08-channels.md` was reorganized into core / two extensions / implementation
+> profiles, and every E-1..E-17 (Part 2) and I-1..I-10 (Part 3) item below is
+> now RESOLVED in normative spec text. Consequently: **Part 1's bare line
+> citations refer to `9f1c7fd:08-channels.md` and no longer match current
+> HEAD** (e.g. PV-1's "164-166" is now other text; the policy moved). Parts 2
+> and 3 are retained as the **decision record** — what changed and why — not as
+> open work. The live acceptance source is the restructured spec plus the
+> per-MR §7 owner table in the plan; use this matrix for the requirement IDs
+> and the rationale, and read the citation as `9f1c7fd:...`.
+
+**Purpose**: the requirement checklist a stage-1 implementation (upgrade/downgrade
 channel-VTXO lifecycle on stock LDK, no teleport, no Ark channel type / HTLC
 success CSV) must satisfy, extracted from the spec, plus the places where
-stage-1 text is entangled with excluded mechanisms (input to the spec
-restructure) and the requirements that are impossible or meaningless without
-them (candidates for explicit stage-1 profile relaxation).
+stage-1 text was entangled with excluded mechanisms (which drove the spec
+restructure) and the requirements impossible or meaningless without them (which
+became the first-release profile's relaxations — now landed).
 
 **Source**: spec working tree at bookmark `phase4_deletions` (`9f1c7fd`), where
 open = upgrade and close = downgrade are the only open/close mechanisms.
 Files: `08-channels.md` (repo root), `05-arkoor.md`, `02-vtxo.md`,
-`00-overview.md`, `docs/channel-user-stories.md`.
+`00-overview.md`, `docs/channel-user-stories.md`. **All Part-1 line refs are
+`9f1c7fd`-relative** (see the note above).
 
 **Excluded from stage 1** (for reference): channel refresh (`08-channels.md`
 §"Refresh" ~702–908, §"The teleport protocol" ~909–1109, `leaf_vtxo_cosign`
@@ -112,7 +126,7 @@ explicit channel path could otherwise sidestep the generic validators.
 - **OP-18 MUST\*** — Virtual funding = treating the funding output as confirmed once the VTXO's chain anchor confirms; presented as confirmed at the anchor's **actual** best-chain height. — `08-channels.md:106-115`
 - **OP-19 MUST** — An implementation MUST NOT advance its best-chain view beyond the real best chain to manufacture virtual depth. — `08-channels.md:115-116`
 - **OP-20 MUST** — Every height-dependent decision MUST observe **one** consistent, real-chain history, including reorgs and unconfirmations in order. — `08-channels.md:117-121`
-- **OP-21 MUST\*** — An anchor disconnection withdraws the virtual confirmation, suspending normal channel operation until a valid anchor is re-established. — `08-channels.md:121-123`
+- **OP-21 MUST\*** — An anchor disconnection withdraws the virtual confirmation, suspending normal channel operation until a valid anchor is re-established. — `08-channels.md:121-123` *(first-release profile override, see I-10: suspend-and-resume is unachievable on stock LDK — the profile withdraws the confirmation only on a deep anchor reorg and accepts the resulting stock force-close as fail-closed; landed in the profile's "Anchor reorganizations fail closed" bullet.)*
 - **OP-22 MUST** — A restart MUST NOT weaken any of this: a node MUST NOT accept or forward HTLCs on a channel until it again holds a coherent chain view and funding status for it, and MUST leave the channel fail-closed if it cannot recover them. — `08-channels.md:123-126`
 
 **Messages — `arkoor_cosign_request` channel (upgrade) variant**
@@ -299,15 +313,15 @@ justified by an excluded mechanism. Quotes verbatim.
 
   — every relative timelock on the path plus the unroll **distance** to the actual commitment transaction: up to `D` *sequential* genesis confirmations (unrolling lag — each level confirms before the next broadcasts), the bridge's `d` BIP-68 CSV, and then bridge, commitment, and HTLC second-stage confirmations plus fee-bump lag inside `cltv_claim_slack` (a config with a conservative documented default). Checked arithmetic (I-8) and u16-representability wherever `F` feeds an LDK `cltv_expiry_delta`-typed field. The stop-forwarding/force-close deadline uses `F` on the two thresholds of EX-4.
 - **I-5** — The upgrade admission Runway floor is the same excluded formula. **Resolution**: runway floor = the same unified floor `F`.
-- **I-6 (rewritten at G0 — codex F1, Critical)** — The keysend/CLTV-floor rules do **NOT** cleanly drop. Rationale: LDK was told the funding is *already confirmed*, so its ordinary CLTV buffers budget **none** of the Ark actualization prefix — yet any on-chain HTLC claim on a stage-1 channel must first cross that whole prefix (`D` unroll + `d` bridge CSV + confirmations). An HTLC admitted below the floor can expire before any claim is even *possible* — a deterministic loss, distinct from the deferred success-vs-timeout race. The floor `F` MUST therefore be enforced at every per-HTLC CLTV decision:
-  (a) invoices we issue: `min_final_cltv_expiry_delta ≥ F`;
-  (b) every received HTLC: reject if `cltv_expiry − real_chain_height < F` — this per-HTLC check also handles **keysend** (no blanket reject needed: the spec's blanket rule existed only because the CSV-era floor could not be advertised per-payment);
-  (c) the server's forwarding `cltv_expiry_delta ≥ F` on Ark-backed hops;
-  (d) per-HTLC force-close scheduling: a channel holding an in-flight HTLC whose remaining budget approaches `F` force-closes now.
+- **I-6 (rewritten at G0 — codex F1, Critical)** — The keysend/CLTV-floor rules do **NOT** cleanly drop. Rationale: LDK was told the funding is *already confirmed*, so its ordinary CLTV buffers budget **none** of the Ark actualization prefix — yet any on-chain HTLC claim on a stage-1 channel must first cross that whole prefix (`D` unroll + `d` bridge CSV + confirmations). An HTLC admitted below the floor can expire before any claim is even *possible* — a deterministic loss, distinct from the deferred success-vs-timeout race. The floor `F` MUST be enforced at every per-HTLC CLTV decision, with the exact quantifiers the completion review landed into the spec (08-channels.md core, "The force-close deadline"):
+  (a) invoices we issue: `min_final_cltv_expiry_delta ≥` the **maximum** `F` across the channels the invoice could be paid over (an invoice is not bound to one receiving channel);
+  (b) every received HTLC: reject if `cltv_expiry − real_chain_height <` the **actual receiving channel's** `F` — this per-HTLC check also handles **keysend** (no blanket reject needed);
+  (c) forwarding: require `incoming_cltv − outgoing_cltv ≥ F_in` — the **incoming** scope's floor, the channel whose HTLC must be claimed on-chain if the outgoing leg resolves late (or advertise a `cltv_expiry_delta` dominating every incoming scope that can feed the hop);
+  (d) per-HTLC force-close scheduling: force-close **no later than the point** an unresolved in-flight HTLC that must be driven on-chain has exactly `F` of budget remaining.
 - **I-7** — The bridge/success-CSV cross-derivation invariant and its restore-time force-close guard (`:417-419`, `:310-315`) are vacuous; only the bridge-`nSequence` half (BR-3/BR-8) survives.
 - **I-8** — The `≤ 65535` checked-arithmetic bound is a property of the excluded formula; stage-1's simplified floor needs its own (looser) overflow check, kept in checked arithmetic.
 - **I-9** — "Too deep to split ⇒ refresh-then-downgrade" has **no substitute**: a stage-1 channel whose backing depth exceeds the downgrade bound has no cooperative close path, forever. **Resolution (mandatory design decision)**: reserve downgrade headroom at open-time admission — require the resulting channel-VTXO depth to leave room for a worst-case (checkpointed) split, i.e. `resulting_depth ≤ pinned channel_max_vtxo_exit_depth − 2` — and prefer `use_checkpoint=false` upgrades (OP-3) to minimize depth consumed at open. **G0 amendment (codex F6)**: the reservation guarantees nothing if the server's LIVE `max_vtxo_exit_depth` later *decreases* — the generic split eligibility check (DA-8) uses the then-current bound, and the pinned value cannot override ARK #2. The server MUST refuse a configuration decrease that would strand any live channel past downgrade eligibility (or require those channels closed first); enforce checked `max_vtxo_exit_depth ≥ 2`; the client retains its pre-close live-bound re-check; tested across a restart with a lowered bound.
-- **I-10** *(added at G0 — codex F3)* — OP-21's suspend-until-reestablished is **unachievable on stock LDK**: withdrawing the funding confirmation force-closes an active channel rather than suspending it. **Stage-1 disposition**: the chain-feed adapter withdraws the virtual funding confirmation only on a genuine (deep) reorg of the anchor — anchors are typically deeply confirmed at open — and the resulting stock force-close is accepted as the fail-closed direction the spec itself prefers (WD-15). Proven in the spike. Related stock-LDK constraint, same origin — **and a spec gap (2026-07-30): the synthesized confirmation POSITION is unspecified in the spec.** LDK derives a real SCID from the fed `(height, tx_index, vout)` and hard-asserts on per-node collisions; the height is pinned by OP-18 (the anchor's actual height) but the transaction index is pure fiction — it cannot reflect any on-chain reality. Requirements the spec must state (virtual-funding section):
+- **I-10** *(added at G0 — codex F3)* — OP-21's suspend-until-reestablished is **unachievable on stock LDK**: withdrawing the funding confirmation force-closes an active channel rather than suspending it. **Stage-1 disposition**: the chain-feed adapter withdraws the virtual funding confirmation only on a genuine (deep) reorg of the anchor — anchors are typically deeply confirmed at open — and the resulting stock force-close is accepted as the fail-closed direction the spec itself prefers (WD-15). Proven in the spike. Related stock-LDK constraint, same origin — the synthesized confirmation POSITION (**this was a spec gap when written; it LANDED 2026-07-30 in the virtual-funding trust bullet of `08-channels.md`**). LDK derives a real SCID from the fed `(height, tx_index, vout)` and hard-asserts on per-node collisions; the height is pinned by OP-18 (the anchor's actual height) but the transaction index is pure fiction — it cannot reflect any on-chain reality. Requirements the spec must state (virtual-funding section):
   (i) node-local uniqueness: distinct `(height, tx_index)` across every channel the node operates — two channels anchored at the same height (e.g. two upgrades from one round) MUST get distinct indices;
   (ii) lifetime stability: the same position is re-fed across restarts (LDK re-asserts on reload);
   (iii) bounds: 24-bit index, nonzero (0 is the coinbase position);

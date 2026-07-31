@@ -93,12 +93,17 @@ migration is one file.
    cltv_claim_slack` — every relative timelock on the path plus the unroll
    distance to the actual commitment tx (sequential genesis confirmations =
    unrolling lag, the bridge's CSV, then bridge/commitment/second-stage
-   confirmations and fee-bump lag inside the slack config). Applied at:
-   upgrade-admission runway; the force-close deadline; invoice
-   `min_final_cltv_expiry_delta`; **every received HTLC** (per-HTLC check —
-   also the keysend answer, no blanket reject); the server's forwarding
-   `cltv_expiry_delta` on Ark-backed hops; per-HTLC force-close scheduling.
-   Checked arithmetic, u16-representability where it feeds LDK config.
+   confirmations and fee-bump lag inside the slack config). Applied, with
+   the quantifiers the completion review pinned into the spec (08-channels.md
+   core, "The force-close deadline"): upgrade-admission runway ≥ `F`; a
+   received HTLC checks the **actual receiving channel's** `F`; an invoice
+   not bound to one channel advertises the **maximum** `F` across eligible
+   receiving channels (keysend covered per-HTLC, no blanket reject); a
+   forwarding node requires `incoming_cltv − outgoing_cltv ≥ F_in` (the
+   **incoming** scope's floor — the channel whose HTLC it must claim if the
+   outgoing leg resolves late); and force-close is triggered **no later than
+   the point an unresolved HTLC has exactly `F` remaining**. Checked
+   arithmetic, u16-representability where it feeds LDK config.
    Dropping only the CSV-derived *second* `pinned_exit_delta` is verified
    sound; dropping the prefix is a deterministic HTLC-loss vector.
 3. **Two-threshold deadline** (codex F4): an earlier **cooperative lead**
@@ -264,39 +269,50 @@ confirmation-injection rather than message interception.
 
 ## 5. MR sequence
 
-**Granularity decision (G0)**: codex proposed splitting MR-3/MR-5 further
-(→ ~10 MRs); the maintainer constraint is NOT to exhaust upstream with a
-long dependent PR stream. Resolution: **consolidate to five upstream MRs**
-and answer reviewability at the **commit** layer instead — upstream CI
-already checks `cargo check` per commit, i.e. they review commit-by-commit,
-so each MR below is an internally staged, per-commit-buildable narrative
-(the units codex wanted as separate MRs become the commit stages inside
-one MR). Every MR leaves the tree inert (feature-gated off) and
-independently mergeable. After MR-1 lands, explicitly ask the maintainers
-their preferred chunking for the remainder and re-cut if asked —
-calibrating to the actual reviewer beats theorizing.
+**Granularity decision (G0)**: codex proposed splitting further (→ ~10
+MRs); the maintainer constraint is NOT to exhaust upstream with a long
+dependent PR stream. Resolution: answer reviewability at the **commit**
+layer — upstream CI checks `cargo check` per commit, i.e. they review
+commit-by-commit, so each MR below is an internally staged,
+per-commit-buildable narrative (the units codex wanted as separate MRs
+become commit stages inside one MR). Every MR leaves the tree inert
+(feature-gated off) and independently mergeable. After the protocol MR
+lands, ask the maintainers their preferred chunking for the remainder and
+re-cut if asked — calibrating to the actual reviewer beats theorizing.
 
-**DISPOSITION REVISED 2026-07-30 (Greg): the release-contract branch is
-posted upstream as a DRAFT MR — the series' opener and engagement vehicle,
-superseding the design-issue-first plan (description:
-`2026-07-30-draft-mr-description.md`). The numbered MRs below stack after
-it.**
+**DISPOSITION (revised 2026-07-30): the series is SIX upstream MRs —
+`MR-0` (the `bark-channels` release-contract crate) is now the upstream
+**opener** and engagement vehicle (a draft MR, description
+`2026-07-30-draft-mr-description.md`), planned for posting by Greg;
+`MR-1..MR-5` stack after it.** (This supersedes the earlier
+design-issue-first / MR-0-stays-local plan; the spec-restructure track is
+complete.) The `MR-0/MR-1 = protocol` labels below are unchanged from the
+work breakdown; the maintainer-facing draft uses a plain list, not these
+internal numbers.
 
-**MR-0 — LDK release spike. ✅ DONE 2026-07-29 — ALL SIX ASSERTIONS GREEN
-on stock lightning 0.2.4; the releases-only posture is CONFIRMED, no escape
-hatch needed.** (bark-stage1 branch `ark8-channels-stage1`, two commits: scaffold +
-release-contract tests (`tests/release_contract.rs` + `tests/common/mod.rs`).
-Suite grew to **11/11** (~3s) through two codex review cycles (records in
-this directory): added pins for the funder's empty-witness panic and
-historical-height virtual confirmation (depth is computed against the live
-best block — the upgrade shape works natively), restart-of-either-side SCID
-stability with the fresh-KeysManager-start-time contract, unannounced/alias
-wire behavior with an alias-routed payment, and structural+fee assertions on
-both bump legs asserted against in-test-known data (derived prevout fees,
-descriptor-vs-commitment cross-checks, cryptographic wallet-signature
-verification, witness-script-hash binding — full script-interpreter
-validation deliberately out of scope). **Final codex verdict:
-PASS-WITH-CHANGES, residuals applied — MR-0 CLOSED 2026-07-30** at
+**MR-0 — the release-contract crate (the upstream opener). ✅ its review is
+CLOSED; the branch is ready to post as the draft MR.** The eleven enumerated
+virtual-funding / fee-bump behaviors of stock lightning 0.2.4 are pinned, so
+the releases-only posture is confirmed with no escape hatch needed. (Scope
+note: `lightning-background-processor` *fit* is NOT proven here — the suite
+uses a hand-rolled pump; the background-processor integration decision moves
+to the captaind MR. The "eleven contracts" is the accurate claim, not "every
+LDK behavior the feature depends on".) bark-stage1 branch
+`ark8-channels-stage1`, two commits: scaffold + release-contract tests
+(`tests/release_contract.rs` + `tests/common/mod.rs`). Suite **11/11** (~3s,
+per Greg's local run — the codex review sandboxes could not bind the socket
+tests) through three codex review cycles (records in this directory): pins
+for the funder's empty-witness panic and historical-height virtual
+confirmation (depth is computed against the live best block — the upgrade
+shape works natively), restart-of-either-side SCID stability with the
+fresh-KeysManager-start-time contract, unannounced/alias wire behavior with
+an alias-routed payment, and structural+fee assertions on both bump legs
+against in-test-known data (derived prevout fees, descriptor-vs-commitment
+cross-checks, cryptographic wallet-signature verification, witness-script-hash
+binding — full script-interpreter validation deliberately out of scope).
+**Final codex verdict: PASS-WITH-CHANGES, residuals applied — the
+release-contract review is CLOSED 2026-07-30** (the upstream draft MR itself
+is not yet opened) at
 scaffold `a79035a9` + tests `ea33bbf4`; four review records in this
 directory. The three SCID pins: restart +
 identical re-feed keeps the SCID — structurally inert since assignment is
@@ -352,18 +368,25 @@ Old-branch refs: B1/B2 bridge builder; `159cc168c` (what NOT to re-add).
 
 **MR-2 — captaind: LDK harness crate + channels subsystem + server open
 path.** Theme: *captaind can be the channel counterparty.*
-Commit stages: (1) harness crate (assembly, shim, capture broadcaster,
-chain feed, BumpTransaction interface — MR-0's tests land here);
+Commit stages: (1) the crate's PRODUCTION harness — assembly, shim, capture
+broadcaster, chain feed, BumpTransaction interface — added as `src/`
+**alongside the opener's existing tests** (the crate is not recreated; the
+MR-0 test-harness helpers inform these production types, and MR-0's suite
+must stay green against them); **evaluate and wire
+`lightning-background-processor` here** (the fit deferred from MR-0);
 (2) captaind subsystem scaffold (`[channels]` OptionalService, V54 blobs +
 channel state + schema.sql/config.default.toml artifacts, node lifecycle,
-dedicated DB executor, background-processor wiring, peer listener gated on
-chain catch-up); (3) upgrade admission (OP-4/5/25/26, DA-6/7 + reservation,
-runway floor F, pinned params, IB route-through, bridge reconstruction +
-cosign BR-18, rides `vtxos_in_flux`); (4) the registration gate
-(confirmation-injection on complete registration, late-registration refusal
-RG-7 with not-exited re-check) + parent-exit watch (ChainEventListener,
-WD-2..5) + watchman expiry arm (EX-1/7) + config-decrease guard.
-Tests: harness integration (from MR-0), admission vectors via crafted
+dedicated DB executor, peer listener gated on chain catch-up); (3) upgrade
+admission (OP-4/5/25/26, DA-6/7 + reservation, runway floor F, pinned
+params, IB route-through, bridge reconstruction + cosign BR-18, rides
+`vtxos_in_flux`); (4) the registration gate (confirmation-injection on
+complete registration, late-registration refusal RG-7 with not-exited
+re-check) + parent-exit watch (ChainEventListener, WD-2..5) + watchman
+expiry arm (EX-1/7) + config-decrease guard. **Restart lifecycle (from the
+MR-0 review, load-bearing): quiesce and await pumps/transports BEFORE
+snapshotting; restore dormant; re-register monitors and chain/funding
+state; only then start processing and reconnect** — see cross-cutting notes.
+Tests: harness integration (extends MR-0's suite), admission vectors via crafted
 requests/proxy (tampered channel_id, amount, depth, runway, bridgeless
 destination), gate holds under restart, whole-suite green with the
 subsystem disabled AND enabled (PV-10), concurrent-open DB-executor guard.
@@ -436,6 +459,12 @@ expiry-treadmill UX).
 - Crash-consistency tiers: monitors fail the node (UnrecoverableError);
   manager lags safely; reload failure = fail-fast, never fresh-state
   (OP-22/WD-15).
+- Restart ordering (MR-0 review, applies to both captaind and bark hosts):
+  a node reload MUST quiesce first — stop AND await the event pump, tear
+  down and observe the transport disconnected — BEFORE serializing state;
+  restore dormant; re-register each monitor (`ChannelManagerReadArgs` never
+  calls `chain::Watch`) and re-feed chain/funding state; only then start the
+  pump and reconnect. Snapshot-before-quiesce or pump-before-refeed is a bug.
 - Registration release must re-check the input hasn't exited (RG-7 was a
   real money bug found by adversarial review).
 - Watches arm on COMPLETE registration, correlate by txid-in-package;
@@ -505,22 +534,27 @@ property/operator docs, **W** = profile waiver.
 
 ## 8. Process
 
-- **Spec track (parallel)**: restructure `08-channels.md` into layers (core
-  lifecycle → LN-safety extensions → teleport) resolving E-1..E-17, with a
-  stage-1 profile section codifying §3 (I-1..I-10 resolutions, incl. the
-  unified floor F). The stage-1 MR series links the layer boundary. Owner:
-  Greg + assistant; codex reviews.
-- **Codex gates**: G0 = done (REWORK → this v2). G1 = per-MR design note
-  (before code). G2 = per-MR diff vs the §7 table. G3 = whole-series final
-  review before the first upstream submission.
-- **Branch mechanics**: new branch off `upstream/master` in the bark repo
-  (working name `ark8-channels-stage1`), pushed to `origin`
-  (gsanders87/bark); MRs target `ark-bitcoin/bark` per their CONTRIBUTING.
-- Upstream engagement (decided): **design issue first** — a short RFC on
-  ark-bitcoin/bark before MR-1: the lifecycle, the 5-MR stage plan, the
-  LDK-embedding ask, links to the spec; aligns with their adjacent
-  in-flight branches (`enforcevtxoreg`, `lightning-to-ark-lib`). After
-  MR-1, ask the maintainers their preferred MR chunking for MR-2..5.
+- **Spec track: ✅ COMPLETE.** `08-channels.md` restructured into layers
+  (core lifecycle / the two extensions / implementation profiles),
+  E-1..E-17 resolved and I-1..I-10 codified in normative text (incl. the
+  unified floor F); passed the two-part codex refactor review
+  (PASS-WITH-CHANGES, applied). The stage-1 MRs link the layer boundary.
+- **Codex gates**: G0 = done. G1 = per-MR design note (before code) —
+  MR-1's ran REWORK → reworked → re-review. G2 = per-MR diff vs the §7
+  table. G3 = whole-series review before marking the series ready (not a
+  gate on the opener, which is already posting).
+- **Explicit go/no-go**: implementation code for any MR starts only on
+  Greg's word, after he has seen that MR's final design note + review
+  verdicts. A G1 PASS is necessary but not sufficient.
+- **Branch mechanics**: branch `ark8-channels-stage1` off `upstream/master`,
+  pushed to `origin` (gsanders87/bark); MRs target `ark-bitcoin/bark` per
+  their CONTRIBUTING.
+- Upstream engagement (decided 2026-07-30): **the opener IS the
+  engagement** — post the release-contract branch as a draft MR (superseding
+  the earlier design-issue-first plan), then fold its feedback (naming,
+  chunking, sequencing vs `enforcevtxoreg` / `lightning-to-ark-lib` /
+  `lightning-checkpoint-arkoor-builder` / `htlc-manager`) into the stacked
+  MRs.
 
 ## 9. Decisions log
 
@@ -529,11 +563,13 @@ All open decisions resolved 2026-07-29 (Greg):
 1. **Naming**: crate `bark-channels`, module `server/src/channels/`, CLI
    noun `channel`, REST `/channels`.
 2. **Forwarding**: on when the subsystem is enabled, capped (§3.7).
-3. **Engagement**: design issue first (§8).
+3. **Engagement** (revised 2026-07-30): the opener draft MR *is* the
+   engagement (§8) — supersedes the earlier design-issue-first resolution.
 4. **ark-info**: `bool supports_channels`, spec-exact name (§3.11).
 
-Resolved at G0 rework: MR granularity (five consolidated MRs, commit-layer
-staging, re-cut on maintainer feedback); spike disposition (local, its
-assertions become the harness crate's tests); `cltv_claim_slack` exists as
-config with documented default (exact default proposed in MR-2/MR-3 design
-notes, G1).
+Resolved at G0 rework: MR granularity (commit-layer staging, re-cut on
+maintainer feedback); `cltv_claim_slack` exists as config with a documented
+default (a deployment matter — the exact default is proposed in the captaind/
+bark MR design notes, not the spec). Revised 2026-07-30: the release-contract
+crate is the upstream opener (`MR-0`), not a local spike — six upstream MRs
+total (§5).

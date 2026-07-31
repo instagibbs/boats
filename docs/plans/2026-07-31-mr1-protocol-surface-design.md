@@ -1,143 +1,217 @@
 # MR-1 design note (G1): the protocol surface — `channel-funding` policy, the bridge, the wire fields
 
-**Status**: G1 draft for codex + Greg. 2026-07-31.
-**Baseline**: bark-stage1 `ark8-channels-stage1` (= upstream master + the
-release-contract crate). **Spec targets**: matrix IDs PV-1..5, PV-7,
-PV-8(field), PV-9, PV-10, PV-11(bridge), BR-1..9, BR-14..17(construction),
-OP-23..24(wire shape), OP-28(note).
+**Status**: G1 rework (codex REWORK → this revision). 2026-07-31.
+**Series position**: MR-1 — the protocol surface, stacking on the upstream
+opener (the `bark-channels` release-contract crate). **Baseline**:
+bark-stage1 `ark8-channels-stage1` @ `ea33bbf4` (= upstream master + the
+opener). **Spec targets**: matrix IDs PV-1..5, PV-7, PV-8(field), PV-9,
+PV-10, PV-11(bridge), BR-1..9, BR-14..17(construction), OP-23..24(wire
+shape), OP-28(note) — see §5 for the construction-primitive-only scoping.
 
-## 1. Scope and the inertness property
+## 1. Scope and the (narrowed) inertness property
 
-Types, construction, and wire shape only — **zero behavior change**. After
-this MR a node behaves byte-identically to before: the new policy can be
-encoded/decoded but nothing creates it; the bridge builder exists but
-nothing calls it outside tests; the new proto fields are absent on every
-real message (`supports_channels` stays `false` — the captaind MR flips it
-when the subsystem exists). Every compiler-forced match arm on the new
-policy takes the conservative/refusing branch, each commented with the
-later MR that carves in. Reviewability claim for upstream: "this MR can be
-merged and shipped with no observable effect."
+Types, construction, wire shape — **and the minimum admission gate that
+makes decoding the new policy safe**. The G0/G1 reviews established that
+"nothing creates it" is false without an explicit gate: once `0x08`
+decodes, the *generic* arkoor path (and the shared Lightning pay /
+receive-claim validator that reuses it) would accept a `channel-funding`
+**destination** and mint a bridgeless channel VTXO — marking the input
+spent before signing — because the shared validator gates only the *input*
+policy, and the builder copies arbitrary destination policies through
+(`lib/src/arkoor/mod.rs:415`, `server/src/arkoor.rs:36,122`,
+`server/src/ln/mod.rs:79,735`). A bridgeless `channel-funding` VTXO
+violates the spec's no-bridgeless rule (08-channels.md core), so MR-1 MUST
+foreclose it.
 
-Non-goals (later MRs): upgrade/downgrade admission, registration gating,
-watches, any captaind/bark runtime, ark-info advertisement logic, the
-attestation `channel_id` binding (recorded profile deviation).
+The honest inertness claim is therefore: **previously valid non-channel
+flows are byte/transaction-identical after this MR; every channel-shaped
+request (a `channel-funding` destination anywhere, or a `channel-funding`
+input in any generic consumer) is rejected before any DB write, output
+creation, or spent-state mutation.** Nothing yet *authorizes* a
+channel-funding destination — the upgrade admission path (MR-3, server)
+and the downgrade split (MR-5) add the only two authorized entry points;
+until then the gate refuses all of them. `supports_channels` stays `false`.
 
-## 2. The policy (`lib/src/vtxo/policy/mod.rs` + `lib/src/vtxo/mod.rs`)
+Not fully inert, and the note no longer claims otherwise: adding a public
+`VtxoPolicy` variant and public proto/struct fields is a source-level API
+change (breaks exhaustive matches / struct literals downstream), and
+exposing `supports_channels: false` through bark-json changes observable
+JSON (protobuf stays byte-identical — `false` is omitted). These are
+recorded as API/changelog items, not behavior changes.
 
-- `ChannelFundingVtxoPolicy { user_pubkey: PublicKey }` — struct + impl
-  following `PubkeyVtxoPolicy`'s pattern; new `VtxoPolicy::ChannelFunding`
-  variant (it is a *destination* policy and guarantees `user_pubkey()`, so
-  it belongs in the user-facing enum, mirrored into `ServerVtxoPolicy`'s
-  decode per the explicit mirror note at `vtxo/mod.rs:1084`).
-- `VtxoPolicyKind::ChannelFunding`, Display/FromStr `"channel-funding"`.
-- Tag `VTXO_POLICY_CHANNEL_FUNDING = 0x08` — the next free byte AND the
-  byte the spec pins. **Risk register**: if upstream mints `0x08` for
-  something else mid-review, the spec renumbers with it; raise tag
-  reservation in the draft-MR dialogue.
-- `taproot()`/`clauses()`: internal key `musig(user_pubkey, server_pubkey)`
-  (the existing `musig::tweaked_key_agg` path), exactly **one** leaf —
-  `timelock-sign(expiry_height, S)` — and **no** user exit leaf (PV-3).
-  PV-2 says this is the same construction as a board funding output:
-  implement by **reusing the same clause constructors** the board/cosign
-  taproot uses, and pin the equality in a test (same keys/expiry ⇒ same
-  scriptpubkey) so drift is impossible rather than unlikely.
-- Forced-match inventory (each site gets the refusing/conservative arm +
-  a one-line pointer comment):
-  - server arkoor input eligibility (`server/src/arkoor.rs:150-152`
-    pattern): refuse — the sanctioned split arrives with the downgrade MR;
-  - client send eligibility (`bark/src/arkoor.rs:77-82`): refuse;
-  - round-output construction (`server/src/round/mod.rs`): refuse —
-    round-issuable only under the refresh extension;
-  - watchman action policy (`server/src/watchman/policy.rs`): treat like
-    the other cosign-taproot expiry policies — **expiry-claim** — which is
-    the spec-correct terminal behavior (EX-1) and unreachable until later
-    MRs create such VTXOs;
-  - telemetry/labels, `policy_type` column plumbing: mechanical.
-  - `is_arkoor_compatible()` stays `false`; `arkoor_pubkey()` `None`. The
-    upgrade (destination) and downgrade (input) get explicit entry points
-    in their own MRs rather than blanket compatibility here.
+Non-goals (later MRs): upgrade/downgrade *authorization* and admission
+checks, registration gating, watches, any captaind/bark runtime, the
+ark-info advertisement *logic*, the attestation `channel_id` binding
+(recorded first-release profile deviation).
 
-## 3. The bridge (`lib/src/channel.rs`, precedent: `lib/src/board.rs`)
+## 2. The policy and the admission gate
 
-Pure functions of `(channel VTXO outpoint + amount + taproot spend info,
+### 2a. Policy type (`lib/src/vtxo/policy/mod.rs`, `lib/src/vtxo/mod.rs`)
+
+- `ChannelFundingVtxoPolicy { user_pubkey: PublicKey }` following
+  `PubkeyVtxoPolicy`; new `VtxoPolicy::ChannelFunding` variant (a
+  *destination* policy guaranteeing `user_pubkey()`), mirrored into
+  `ServerVtxoPolicy`'s decode per the mirror note at `vtxo/mod.rs:1084`.
+- `VtxoPolicyKind::ChannelFunding`; Display/FromStr `"channel-funding"`.
+- Tag `VTXO_POLICY_CHANNEL_FUNDING = 0x08` — next free byte and the
+  spec-pinned byte. **Tag-race handling**: an upstream `0x08` allocation
+  mid-review REOPENS G1 (spec + matrix + vectors + compatibility fixtures
+  all move together), not a silent renumber; raise a tag reservation in
+  the draft-MR dialogue.
+- **Taproot (corrected per G1-F2)**: the internal key is the **untweaked**
+  aggregate. Reuse the board/cosign constructors exactly:
+
+  ```rust
+  let internal = musig::combine_keys([user_pubkey, server_pubkey]).x_only_public_key().0;
+  cosign_taproot(internal, server_pubkey, expiry_height)   // adds the one expiry leaf
+  ```
+
+  `cosign_taproot` (the board path, `lib/src/board.rs:53` via
+  `lib/src/tree/signed.rs:69`) performs the taproot output tweak; do NOT
+  use `tweaked_key_agg` for the internal key (that is for key-path signing,
+  §3). `clauses()` returns exactly one `TimelockSignClause(expiry, S)` and
+  **no** user exit leaf (PV-1..3). Pinned by a byte-equality test against
+  a board funding output built from the same keys/expiry (PV-2).
+
+### 2b. The admission gate (the one behavior this MR adds)
+
+- **Destination gate**: the shared pre-builder validator
+  (`validate_cosign_request` / `cosign_oor_with_builder` in
+  `server/src/arkoor.rs`, reached by direct arkoor AND
+  `server/src/ln/mod.rs`'s pay/receive-claim) MUST reject any
+  `ChannelFunding` destination — normal or isolated — before the
+  `execute_vtxo_tree_update` write and before the `vtxos_in_flux`
+  spent-mark. Refuse with a distinct `badarg`.
+- **Input gate**: generic cosign input eligibility
+  (`server/src/arkoor.rs:150-152`) already rejects non-`Pubkey` inputs, so
+  a `ChannelFunding` input is refused there; add an explicit arm + comment
+  so the refusal is intentional, not incidental, and mirror the check in
+  round-input (`server/src/round/mod.rs:313`) and offboard
+  (`server/src/offboards.rs:187`) admission (both currently accept policies
+  generically).
+- Client-side send eligibility (`bark/src/arkoor.rs:77-82`) refuses too.
+
+### 2c. Forced-match inventory (compiler-enforced; each arm is the safe one)
+
+Verified against the tree (G1-F4):
+- `VtxoPolicyKind::Display` (`policy/mod.rs:170`).
+- The six `VtxoPolicy` methods at `policy/mod.rs:720`: `policy_type`,
+  `is_arkoor_compatible` (→ `false`), `arkoor_pubkey` (→ `None`),
+  `user_pubkey` (→ the field), `taproot`, `clauses`.
+- Encoding (`vtxo/mod.rs:1025`) — the `0x08 || 33-byte key` arm.
+- The historical bark migration `m0021_fix_lightning_movements.rs:49` —
+  safe arm `false`.
+- Round-output construction/telemetry, watchman policy — watchman takes the
+  **expiry-claim** arm (spec-correct terminal behavior EX-1; unreachable
+  in-tree until a later MR creates such a VTXO, which is why the gate in
+  §2b is what actually keeps it unreachable now).
+- `FromStr` and the server decoder mirror are wildcard/tag matches (not
+  compiler-forced) but semantically required — covered by tests.
+
+## 3. The bridge (`lib/src/channel.rs`; precedent `lib/src/board.rs`)
+
+Pure functions of `(channel-VTXO outpoint + amount + taproot spend info,
 two BOLT-3 funding pubkeys, pinned_exit_delta)`:
 
 - `bridge_tx(..) -> Transaction`: `nVersion=3`, `nLockTime=0`, one input
-  (the channel VTXO output, `nSequence = pinned_exit_delta`, empty
-  witness), out0 = P2WSH of
-  `lightning::ln::chan_utils::make_funding_redeemscript(k1, k2)` (the
-  canonical BOLT-3 script — lib already depends on `lightning`, and using
-  LDK's own constructor makes cross-stack drift impossible) with value =
-  the full VTXO amount (0-fee), out1 = `bitcoin_ext::fee::fee_anchor()`
-  (P2A, zero value). BR-1..6.
+  (channel VTXO output, `Sequence::from_height(pinned_exit_delta)`, empty
+  witness), out0 = `.to_p2wsh()` of
+  `lightning::ln::chan_utils::make_funding_redeemscript(k1, k2)` (canonical
+  BOLT-3, key-sorted; lib already deps `lightning` 0.2.4) with value = the
+  full VTXO amount (0-fee), out1 = `bitcoin_ext::fee` P2A anchor (zero
+  value). BR-1..6, PV-11. (G1 confirmed all of these correct.)
 - `bridge_sighash(..) -> TapSighash`: BIP-341 key-path, `SIGHASH_DEFAULT`,
-  all prevouts (= the single channel-VTXO TxOut). BR-15/17.
-- MuSig2 helpers over the existing `lib/src/musig.rs` surface:
-  nonce pair, partial sign, partial verify, and finalize-to-witness
-  (aggregate → 64-byte schnorr keyspend witness), all against the
-  policy's tweaked aggregate key.
-- Determinism is the point (BR-9): construction is witness-independent, so
-  both sides compute the same `bridge_txid` before any signature exists —
-  that txid is what later MRs derive the permanent `channel_id` and the
-  funding outpoint (`bridge_txid:0`) from. A doc comment states this
-  contract; MR-1 adds no `channel_id` helper (it is opaque bytes at this
-  layer).
+  `Prevouts::All(&[channel_vtxo_txout])`. BR-15/17.
+- MuSig2 helpers over `lib/src/musig.rs`, using
+  `tweaked_key_agg([A,S], spend_info.tap_tweak())` for the **signing**
+  aggregate: nonce pair, partial-sign, partial-verify, and finalize →
+  64-byte schnorr key-spend witness.
+- Determinism (BR-9): construction is witness-independent, so both sides
+  compute the same `bridge_txid` before any signature — the value MR-3
+  later derives the permanent `channel_id` and funding outpoint
+  (`bridge_txid:0`) from. Documented as a contract; MR-1 adds no
+  `channel_id` helper (opaque bytes at this layer).
 
-## 4. The wire (`server-rpc/protos/bark_server.proto` + `convert.rs` + lib structs)
+## 4. The wire (grouped carriers per G1-F3)
 
-- `ArkoorCosignRequest` += `optional bytes channel_id = 7;` and
-  `optional bytes bridge_pub_nonce = 8;` (tags 1–6 in use). Field comments
-  carry the semantics + spec pointer: presence marks the part as an
-  upgrade; the server cosigns transfer and bridge in one exchange; a peer
-  that does not implement channels ignores them (PV-10).
-- `ArkoorCosignResponse` += `optional bytes bridge_pub_nonce = 3;` and
-  `optional bytes bridge_partial_sig = 4;`.
-- `ArkInfo` += `bool supports_channels = 21;` (+ bump the `last index`
-  comment). Client-side `ArkInfo` struct gains the field; nothing reads it
-  yet beyond exposure.
-- Rust carriers: the lib `ArkoorCosignRequest`/response structs gain
-  `Option<..>` fields threaded through `server-rpc/src/convert.rs`
-  round-trips. **Attestation note (OP-28/OP-29)**: the attestation message
-  computation is untouched — `channel_id` rides deliberately unbound (the
-  recorded first-release profile deviation); the destination's policy
-  bytes already commit the channel-funding `user_pubkey`/amount, and a
-  tampered `channel_id` fails at bridge partial-signature verification.
+Loose `Option` fields let package transformations (`with_vtxo`,
+`convert_vtxo`, `set_vtxos` in `lib/src/arkoor/{mod,package}.rs`) silently
+drop half a pair. Use grouped carriers instead:
 
-## 5. Tests (upstream style; unit tests in-file, vectors in `lib/src/test_util/vectors.rs` where fitting)
+- proto: `ArkoorCosignRequest` += `optional bytes channel_id = 7;`
+  `optional bytes bridge_pub_nonce = 8;`; `ArkoorCosignResponse` +=
+  `optional bytes bridge_pub_nonce = 3;` `optional bytes
+  bridge_partial_sig = 4;`; `ArkInfo` += `bool supports_channels = 21;`
+  (bump the `last index` comment). Tags verified free.
+- lib carriers: `Option<BridgeCosignRequest { channel_id: [u8;32],
+  pub_nonce }>` on the request, `Option<BridgeCosignResponse { pub_nonce,
+  partial_sig }>` on the response — one `Option` each, so a half-present
+  pair is unrepresentable internally.
+- `convert.rs` MUST reject a half-present or malformed protobuf pair
+  (not silently `None` it), and the group MUST survive every package
+  transformation — tested protobuf → internal → `set_vtxos`/`convert_vtxo`
+  → protobuf.
+- Attestation (OP-28, reworded per G1-F3-clean): the attestation message
+  hashes only input id, output count, per-output amount, and per-output
+  policy bytes (`lib/src/attestations.rs:388`) — it provably cannot absorb
+  the new request fields. `channel_id` rides deliberately unbound (recorded
+  profile deviation); the amount is committed separately and the policy
+  bytes commit the channel-funding `user_pubkey`; a tampered `channel_id`
+  fails at bridge partial-signature verification (MR-3).
+
+## 5. Tests and the construction-primitive scoping (G1-F5)
+
+These matrix IDs are dischargeable HERE only as **construction/schema
+primitives**; their runtime obligations stay owned by MR-3/MR-5 and the
+matrix §7 row is labeled accordingly:
+- BR-3/BR-8 (source/storage/never-reread-live), BR-4 (negotiated-amount
+  equality), BR-7 (commitment-input half), BR-14 (key exchange/registry),
+  BR-16 (commitment signing), BR-15/BR-17 (once-at-open / session
+  freshness / atomicity / retry), OP-23 (identifier lookup), OP-24
+  (at-most-one-part admission) — MR-1 pins only the tx/schema shape they
+  build on.
+
+Tests (upstream style; unit in-file, vectors in
+`lib/src/test_util/vectors.rs`):
 
 | Pin | Test |
 |---|---|
-| encode/decode round-trip + kind strings | policy unit tests |
-| unknown-tag rejection (PV-7/PV-9): a `0x09` blob AND a pre-channel decoder posture vs `0x08` | decode-failure unit test |
-| taproot construction + no-exit-leaf (PV-1..3) | known-vector scriptpubkey hex, fixed keys/expiry |
-| board-construction equality (PV-2) | same-inputs taproot equality test |
-| bridge shape (BR-1..6, PV-11) | field-by-field asserts on `bridge_tx` |
-| determinism (BR-9) | two independent constructions byte-identical; pinned txid vector |
-| sighash + MuSig2 round-trip (BR-15/17) | sign both halves, aggregate, schnorr-verify vs the tweaked output key |
-| proto optionality (PV-10, OP-23..24 shape) | convert.rs round-trips with and without the channel fields |
+| exact `0x08 \|\| 33-byte-key` encoding + decode round-trip + kind strings | policy unit + vector |
+| unknown-tag rejection: a **`0xff`** blob (not `0x09` — the likely next allocation) | decode-failure unit |
+| taproot shape, no exit leaf, key-role separation (PV-1..4) | scriptpubkey hex vector, fixed keys/expiry |
+| board-construction byte-equality (PV-2) | same-inputs equality test |
+| bridge shape + `verify_tx` (BR-1..6, PV-11) | field asserts + consensus `verify` of the funding-input spend |
+| determinism (BR-9) | two constructions byte-identical; pinned txid vector |
+| sighash + MuSig2 round-trip (BR-15/17) | sign both halves, aggregate, assert **one 64-byte DEFAULT witness**, schnorr-verify vs the tweaked output key; **reject a corrupted partial**; **funding-key-order independence** |
+| **destination gate** (the new behavior): direct arkoor AND shared Lightning-pay both reject a `ChannelFunding` destination **before any DB/output/spent-state mutation** | server unit/integration |
+| generic **input** refusal (arkoor/round/offboard) | server unit |
+| proto optionality + pair preservation (PV-10, OP-23..24 shape) | convert round-trips ±channel fields, and through `set_vtxos`/`convert_vtxo` |
+| legacy decoder posture (PV-9) | old-shape protobuf still round-trips; unknown proto fields skipped (prost 0.14 skips-not-preserves) |
 
-Plus: whole-workspace `cargo check --all --tests --examples` green (the
-inertness claim), and the release-contract suite untouched and green.
+Plus whole-workspace `cargo check --all --tests --examples` green, the
+opener's release-contract suite untouched and green.
 
-## 6. Commit plan (within the one MR)
+## 6. Commit plan (each builds workspace-wide)
 
-1. `lib: add the channel-funding VTXO policy` — policy + forced arms +
-   policy tests.
+1. `lib: add the channel-funding VTXO policy` — policy + taproot
+   (combine_keys+cosign_taproot) + the full forced-match inventory
+   (incl. m0021) + encoding + policy/vector tests.
 2. `lib: the presigned bridge transaction and its cosign helpers` —
-   `channel.rs` + bridge tests.
-3. `server-rpc: optional channel fields on the arkoor cosign exchange;
-   supports_channels in ark info` — proto + convert + carrier structs +
-   round-trip tests.
-
-Each commit builds workspace-wide (their per-commit CI).
+   `channel.rs` + bridge/sighash/musig + `verify_tx` and the sign tests.
+3. `server: reject channel-funding in generic cosign, round, and offboard
+   admission` — the destination + input gates + before-mutation tests.
+   (The one behavior commit; isolable and independently reviewable.)
+4. `server-rpc, bark: optional channel fields on the arkoor cosign
+   exchange; supports_channels in ark info` — proto + grouped carriers +
+   convert (half-present rejection) + package-preservation tests + server
+   `ArkInfo` construction (still `false`) + bark-json field + its
+   field-completeness test. Carries the API/changelog note.
 
 ## 7. Open items for review
 
-1. Module name `lib/src/channel.rs` (vs `vtxo/channel.rs`) — board.rs
-   precedent argues top-level.
-2. `optional` proto3 presence-tracking vs bare fields for the new bytes
-   fields — `optional` chosen for explicit presence (matches
-   `max_vtxo_amount`'s precedent).
-3. Whether the ArkInfo field should wait for the captaind MR instead —
-   included here because the client-side refusal test (PV-8) wants the
-   field to exist, and a permanently-false bool is inert.
+1. Module name `lib/src/channel.rs` (board.rs precedent argues top-level).
+2. Whether commit 3 (the gate) should instead fold into the captaind MR
+   (MR-3) — decided NO: decoding `0x08` without the gate is unsafe, so the
+   gate ships in the same MR that makes the policy decodable.
+3. `optional` proto3 presence vs bare fields — `optional` for explicit
+   presence (matches `max_vtxo_amount`).
