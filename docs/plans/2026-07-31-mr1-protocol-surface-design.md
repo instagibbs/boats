@@ -85,20 +85,30 @@ ark-info advertisement *logic*, the attestation `channel_id` binding
   mid-review REOPENS G1 (spec + matrix + vectors + compatibility fixtures
   all move together), not a silent renumber; raise a tag reservation in
   the draft-MR dialogue.
-- **Taproot (corrected per G1-F2)**: the internal key is the **untweaked**
-  aggregate. Reuse the board/cosign constructors exactly:
-
-  ```rust
-  let internal = musig::combine_keys([user_pubkey, server_pubkey]).x_only_public_key().0;
-  cosign_taproot(internal, server_pubkey, expiry_height)   // adds the one expiry leaf
-  ```
-
-  `cosign_taproot` (the board path, `lib/src/board.rs:53` via
-  `lib/src/tree/signed.rs:69`) performs the taproot output tweak; do NOT
-  use `tweaked_key_agg` for the internal key (that is for key-path signing,
-  §3). `clauses()` returns exactly one `TimelockSignClause(expiry, S)` and
-  **no** user exit leaf (PV-1..3). Pinned by a byte-equality test against
-  a board funding output built from the same keys/expiry (PV-2).
+- **Taproot — DOMAIN-SEPARATED from board funding (decided 2026-08-03; see
+  §2d).** Internal key = the untweaked aggregate
+  `musig::combine_keys([user_pubkey, server_pubkey])`; the taproot keeps the
+  server-expiry leaf `timelock-sign(expiry, S)` (PV-3) and has **no user
+  exit leaf**. A bare `cosign_taproot(musig(A,S), S, expiry)` is byte-identical
+  to a board funding output; a distinct VTXO type with distinct spending
+  rules should not reuse another type's exact output construction (§2d). The
+  construction therefore adds a **constant channel-domain separator** so the
+  output key differs from a board funding output. **Proposed mechanism
+  (A):** a second, unspendable domain-marker tapleaf →
+  `taproot(musig(A,S), {timelock-sign(expiry,S), <marker>})`. This changes
+  the merkle root (hence the output key) with **no musig change** — the
+  key-path is still a single x-only taproot tweak the existing
+  `tweaked_key_agg` handles — at the cost of +32 witness bytes in the
+  server's script-path expiry sweep (only on the rare
+  actualized-then-abandoned recourse path; the key-path bridge spend is
+  unaffected). *Alternative (B), pending Greg's confirm:* domain-separate in
+  the internal key via a plain ec-tweak (`KeyAggCache::pubkey_ec_tweak_add`)
+  — zero on-chain cost, but needs two-tweak signing variants in the shared
+  musig helpers (`musig.rs` currently threads a single x-only tweak). See
+  §7 open item.
+  Pinned by a byte-**inequality** test vs a board funding output of the same
+  keys/expiry (they must differ — the inverse of the old PV-2 claim), plus
+  the §2d domain-separation test.
 
 ### 2b. The admission invariant (the one behavior this MR adds)
 
@@ -154,6 +164,34 @@ Verified against the tree (G1-F4):
   §2b is what actually keeps it unreachable now).
 - `FromStr` and the server decoder mirror are wildcard/tag matches (not
   compiler-forced) but semantically required — covered by tests.
+
+### 2d. Domain separation from board funding (the second money-safety property)
+
+The (b) invariant covers the paths that run through a *builder* (arkoor,
+round, offboard). Cosignatures over a taproot output, though, are also
+produced by flows that don't touch those builders, so type separation
+cannot rest on builder gating alone: it must rest on the **output
+construction** itself. A bare `cosign_taproot(musig(A,S), S, expiry)` —
+`taproot(musig(A,S), {timelock-sign(expiry, S)})` — is the board funding
+output's exact construction. `channel-funding` is a distinct VTXO type with
+distinct spending rules (spent only via the bridge at
+`nSequence=exit_delta`, or the sanctioned downgrade), so reusing another
+type's exact output key is a footgun: a cosignature valid for one output
+type would be valid for the other. Standard domain-separation hygiene for a
+new type is to give it its own, non-colliding construction.
+
+**Requirement**: the `channel-funding` output key MUST differ from a board
+funding output's for the same `(A, S, expiry)`. This is a structural,
+stateless property, local to the channel-funding construction and
+independent of any server-side flow's behavior. Mechanism per §2a (A: marker
+leaf, or B: internal-key ec-tweak — §7). The channel's own legitimate spends
+stay intact: the bridge/downgrade key-path use the channel taproot's tweak,
+and the server expiry sweep uses the (still-present) expiry leaf.
+
+The domain marker MUST be a **constant** (e.g. a tagged hash of a fixed
+`"ark channel funding"` string), not bound to `channel_id`/`bridge_txid`:
+those derive from the funding outpoint, which derives from the
+channel-funding scriptPubKey — binding them would be circular.
 
 ## 3. The bridge (`lib/src/channel.rs`; precedent `lib/src/board.rs`)
 
@@ -227,7 +265,7 @@ Tests (upstream style; unit in-file, vectors in
 | exact `0x08 \|\| 33-byte-key` encoding + decode round-trip + kind strings | policy unit + vector |
 | unknown-tag rejection: a **`0xff`** blob (not `0x09` — the likely next allocation) | decode-failure unit |
 | taproot shape, no exit leaf, key-role separation (PV-1..4) | scriptpubkey hex vector, fixed keys/expiry |
-| board-construction byte-equality (PV-2) | same-inputs equality test |
+| **domain separation from board (§2d)**: channel-funding output key ≠ board funding output key for the same `(A,S,expiry)` | byte-**inequality** test (the inverse of the old PV-2 equality); assert a key-path signature over one output key does not validate against the other (distinct sighashes) |
 | bridge shape + `verify_tx` (BR-1..6, PV-11) | field asserts + consensus `verify` of the funding-input spend |
 | determinism (BR-9) | two constructions byte-identical; pinned txid vector |
 | sighash + MuSig2 round-trip (BR-15/17) | sign both halves, aggregate, assert **one 64-byte DEFAULT witness**, schnorr-verify vs the tweaked output key; **reject a corrupted partial**; **funding-key-order independence** |
@@ -252,13 +290,14 @@ caller cannot exist without choosing an authorization); the forced-match
 policy arms (§2c) land in the same commit for the same reason.
 
 1. `lib, server: the channel-funding VTXO policy and its admission
-   invariant` — policy type + taproot (combine_keys+cosign_taproot) +
-   encoding + the full forced-match inventory (incl. m0021) + the
-   `ChannelAuthorization` builder parameter (all callers pass `None`) + the
-   round `validate_payment_amounts` refusal (both sub-paths) + the offboard
-   input refusal + policy/vector tests + the before-mutation refusal tests
-   per arkoor caller (incl. the Lightning-pay input case) and both round
-   sub-paths and offboard.
+   invariant` — policy type + **domain-separated taproot (§2a/§2d — NOT
+   `cosign_taproot`)** + encoding + the full forced-match inventory (incl.
+   m0021) + the `ChannelAuthorization` builder parameter (all callers pass
+   `None`) + the round `validate_payment_amounts` refusal (both sub-paths) +
+   the offboard input refusal + policy/vector tests + the domain-separation
+   inequality + key-nonvalidity tests (§2d) + the before-mutation refusal
+   tests per arkoor caller (incl. the Lightning-pay input case) and both
+   round sub-paths and offboard.
 2. `lib: the presigned bridge transaction and its cosign helpers` —
    `channel.rs` + bridge/sighash/musig + `verify_tx` and the sign tests.
 3. `server-rpc, bark: optional channel fields on the arkoor cosign
