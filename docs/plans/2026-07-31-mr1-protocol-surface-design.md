@@ -144,20 +144,34 @@ Enforced fail-closed at each subsystem's construction mechanism (§1):
 - **ArkoorBuilder** (`lib/src/arkoor/mod.rs`): the constructor(s)
   (`new`/`new_with_checkpoint`/`new_isolate_dust` ~1044-1137 and the
   `ArkoorPackageBuilder`) take a required `ChannelAuthorization` and refuse
-  a `channel-funding` destination — normal or isolated, since the builder
-  copies supplied policies into both (`arkoor/mod.rs:427,544`) — unless it
-  is `UpgradeOutput`, and refuse a `channel-funding` input unless it is
-  `DowngradeInput`. This single type-level change covers every arkoor
-  caller at once: direct arkoor (`cosign_oor`), Lightning-pay,
-  Lightning-receive-claim, and Lightning-revocation all construct here
-  (verified: `server/src/arkoor.rs`, `server/src/ln/mod.rs:135,794`,
-  revocation). The builder does NOT enforce `is_arkoor_compatible` today
+  a `channel-funding` destination unless it is `UpgradeOutput`, and refuse
+  a `channel-funding` input unless it is `DowngradeInput`. This single
+  type-level change covers every arkoor caller at once: direct arkoor
+  (`cosign_oor`), Lightning-pay, Lightning-receive-claim, and
+  Lightning-revocation all construct here (verified:
+  `server/src/arkoor.rs`, `server/src/ln/mod.rs:135,794`, revocation). The
+  builder does NOT enforce `is_arkoor_compatible` today
   (`arkoor/mod.rs:1132,1340`) — the required parameter is what forces the
   decision at every call site. MR-1 passes `None` everywhere.
   (G1 history: three rounds of "reject at validator X" each missed a
   sibling path — Lightning-pay bypassing a `cosign_oor`-only check, then the
   delegated round path — which is why the invariant moves into the builder
   itself rather than its callers.)
+  *(AMENDED 2026-08-03, CodeRabbit round on the posted MR: the
+  authorization names a policy KIND, so the builder also bounds the SHAPE
+  — spec MUSTs OP-2/OP-24 backed structurally. An isolated
+  `channel-funding` destination is refused under EVERY authorization
+  (originally `UpgradeOutput` admitted "normal or isolated"; the builder
+  copies supplied policies into both, `arkoor/mod.rs:427,544`, and dust
+  isolation can split a destination — so isolated is now never valid);
+  more than one `channel-funding` destination per builder is refused; and
+  the package builder bounds the count ACROSS its post-allocation
+  builders, which also catches the allocator splitting one authorized
+  destination into fragments over multiple inputs. Distinct error
+  (`InvalidChannelFundingDestinations`) keeps "unauthorized" and
+  "authorized but malformed" apart. Amount/identity binding stays with
+  the captaind MR's admission — the negotiated funding value is server
+  knowledge the builder cannot check.)*
 - **Round** (`server/src/round/mod.rs`): refuse a `channel-funding` output
   (leaf) and input (forfeit) in the shared `validate_payment_amounts`,
   reached by BOTH self-signed and delegated participation (the delegated
@@ -299,6 +313,7 @@ Tests (upstream style; unit in-file, vectors in
 | sighash + MuSig2 round-trip (BR-15/17) | sign both halves, aggregate, assert **one 64-byte DEFAULT witness**, schnorr-verify vs the tweaked output key; **reject a corrupted partial**; **funding-key-order independence** |
 | **builder invariant — destination** (the new behavior): a `ChannelFunding` destination is refused with `ChannelAuthorization::None` on EACH arkoor caller — direct arkoor, Lightning-pay, Lightning-receive-claim (before its preimage settle), Lightning-revocation — **before any DB/output/spent-state mutation** | server unit/integration, one per caller |
 | **builder invariant — input**: a `ChannelFunding` input is refused on each of those callers with `None` — explicitly including the **Lightning-pay input case** (the round-1 bypass) | server unit/integration |
+| **builder invariant — shape** *(added 2026-08-03)*: with `UpgradeOutput`, an isolated `ChannelFunding` destination and >1 `ChannelFunding` destinations are refused; at the package level, >1 channel fragments across post-allocation builders are refused (one destination split across two inputs = two fragments = refused); exactly one, fitting one input, is admitted | lib unit (builder + package) |
 | **round refusal — both sub-paths**: a `ChannelFunding` round output (leaf) and input (forfeit) refused via shared `validate_payment_amounts`, tested on BOTH self-signed AND **delegated** participation (the round-2 bypass) | server unit |
 | **offboard refusal**: a `ChannelFunding` offboard input refused | server unit |
 | proto optionality + pair preservation (PV-10, OP-23..24 shape) | convert round-trips ±channel fields, and through `set_vtxos`/`convert_vtxo`/`with_vtxo` |

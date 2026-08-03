@@ -101,7 +101,7 @@ explicit channel path could otherwise sidestep the generic validators.
 
 **Origin and destination shape**
 - **OP-1 MUST\*** — The channel VTXO comes to exist exactly one way: an **upgrade**, an out-of-round ARK #5 self-spend of a `pubkey` VTXO the user already holds (boarded, round-issued, or arkoor-received). — `08-channels.md:452-461`
-- **OP-2 MUST** — A package effecting an upgrade MUST carry exactly one `channel-funding` destination, and it MUST be a **normal** destination (never isolated). — `08-channels.md:520-521`
+- **OP-2 MUST** — A package effecting an upgrade MUST carry exactly one `channel-funding` destination, and it MUST be a **normal** destination (never isolated). — `08-channels.md:520-521` *(AMENDED 2026-08-03: structurally backed at the CONSTRUCTION layer as of the MR-1 fold — the arkoor builder refuses isolated channel destinations under every authorization and bounds the count to one across the whole package, incl. allocator-split fragments; the request-admission half — negotiated amount, single-part shape, attestation-bound refusal — remains the captaind MR's. MR-1 note §2b.)*
 - **OP-3 SHOULD** — For a single-part package whose destination set is exactly the one `channel-funding` output, the server SHOULD accept `use_checkpoint=false` (a pass-through hop, one exit level shallower); every other shape follows the server's ordinary checkpoint policy. — `08-channels.md:524-530,1776-1779`
 - **OP-4 MUST** — The `channel-funding` destination's `user_pubkey` MUST equal the input VTXO's user key (self-spend binding). — `08-channels.md:531-533`
 - **OP-5 MUST** — Its amount MUST equal the channel's negotiated funding amount (verified against the bridge's funding-output value at cosign). — `08-channels.md:534-536`
