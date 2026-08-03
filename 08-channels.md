@@ -211,8 +211,11 @@ A channel VTXO's output carries the `channel-funding` policy (ARK #2, type byte
   bridge transaction spends, and the path every cooperative spend of the
   VTXO uses;
 * the server's post-expiry sweep leaf, timelock-sign `(expiry_height, S)`;
-* a constant, unspendable **domain-marker leaf** with no spending semantics
-  (`OP_RETURN <C>`, `C` a fixed protocol constant). It exists only so that a
+* a constant, unspendable **domain-marker leaf** with no spending semantics —
+  `OP_RETURN <C>` at leaf version `0xc0`, where
+  `C = tagged_hash("ark/channel-funding-domain-v1", "")`; the exact script
+  bytes and constant value are pinned in the policy's ARK #2 definition.
+  It exists only so that a
   `channel-funding` output key is distinct from a board funding output's:
   a distinct VTXO type carries a distinct, non-colliding output
   construction, so a cosignature produced over one type's output can never
@@ -222,8 +225,9 @@ A channel VTXO's output carries the `channel-funding` policy (ARK #2, type byte
 There is no user VTXO-level exit leaf: a channel VTXO's unilateral-exit
 delay rides on the bridge's input `nSequence`, not on a VTXO leaf.
 
-This is the **cosign taproot** `(musig(A, S), S, expiry_height)` of ARK #2 — a
-VTXO like any other. Two properties matter for channels:
+This is ARK #2's cosign taproot `(musig(A, S), S, expiry_height)` **plus the
+domain-marker leaf** — a VTXO like any other. Two properties matter for
+channels:
 
 * **No user exit leaf.** A `pubkey` output carries a `delayed-sign(exit_delta,
   A)` leaf for the user's unilateral claim; a `channel-funding` output does not.
@@ -306,7 +310,7 @@ upgrade" specifies the flow.
    upgrade transfer: ARK #5 checkpoint + arkoor level (held off-chain)
         │
         ▼
-   channel VTXO output: cosign taproot (musig(A,S), S, expiry)
+   channel VTXO output: taproot(musig(A,S); {expiry-sweep leaf, domain marker})
         │  (bridge transaction, presigned, held off-chain; nSequence = pinned_exit_delta)
         ▼
    funding output: P2WSH 2-of-2 (BOLT-3 funding keys)   ← channel's funding outpoint
@@ -348,7 +352,7 @@ completes.
    input `pubkey` VTXO output (held, off-chain)             [chain anchor: the
         │  (checkpoint tx, when used — see below)            input's, already
         ▼                                                    confirmed]
-   channel VTXO output: cosign taproot (musig(A,S), S, expiry)
+   channel VTXO output: taproot(musig(A,S); {expiry-sweep leaf, domain marker})
         │  (bridge transaction, presigned, held off-chain;
         │   nSequence = pinned_exit_delta)
         ▼
@@ -701,7 +705,7 @@ only by its input's `channel-funding` policy, and the server identifies the
 channel from its own record of which VTXO backs it.
 
 ```
-   channel VTXO output: cosign taproot (musig(A,S), S, expiry)   [old chain
+   channel VTXO output: taproot(musig(A,S); {expiry, marker})     [old chain
         │  (checkpoint tx, per the server's checkpoint policy —   and anchor,
         │   spends by key path, nSequence = 0, ahead of the       unchanged]
         ▼   retired bridge's exit_delta)
