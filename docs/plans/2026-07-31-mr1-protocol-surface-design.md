@@ -88,24 +88,37 @@ ark-info advertisement *logic*, the attestation `channel_id` binding
 - **Taproot — DOMAIN-SEPARATED from board funding (decided 2026-08-03; see
   §2d).** Internal key = the untweaked aggregate
   `musig::combine_keys([user_pubkey, server_pubkey])`; the taproot keeps the
-  server-expiry leaf `timelock-sign(expiry, S)` (PV-3) and has **no user
-  exit leaf**. A bare `cosign_taproot(musig(A,S), S, expiry)` is byte-identical
-  to a board funding output; a distinct VTXO type with distinct spending
-  rules should not reuse another type's exact output construction (§2d). The
-  construction therefore adds a **constant channel-domain separator** so the
-  output key differs from a board funding output. **Mechanism (decided
-  2026-08-03):** a second, unspendable domain-marker tapleaf →
-  `taproot(musig(A,S), {timelock-sign(expiry,S), <marker>})`. This changes
-  the merkle root (hence the output key) with **no musig change** — the
-  key-path is still a single x-only taproot tweak the existing
-  `tweaked_key_agg` handles — at the cost of +32 witness bytes in the
-  server's script-path expiry sweep (only on the rare
-  actualized-then-abandoned recourse path; the key-path bridge spend is
-  unaffected). (An internal-key ec-tweak was the considered alternative —
-  zero on-chain cost — but rejected: `musig.rs` threads a single x-only
-  tweak, so it would need two-tweak signing variants across the shared
-  signing helpers, construction, and verification — the heaviest-review
-  change; the marker leaf is cleaner and self-contained.)
+  **stock** server-expiry leaf `timelock-sign(expiry, S)` (an unchanged
+  `TimelockSign` clause) and has **no user exit leaf** — and adds one
+  unspendable domain-marker leaf. A bare `cosign_taproot(musig(A,S), S,
+  expiry)` — `taproot(musig(A,S), {timelock-sign(expiry, S)})` — is
+  byte-identical to a board funding output; a distinct VTXO type with
+  distinct spending rules should not reuse another type's exact output
+  construction (§2d). **Mechanism (decided 2026-08-03):** a **second,
+  unspendable constant domain-marker tapleaf** →
+  `taproot(musig(A,S), {timelock-sign(expiry,S), <marker>})`. The extra leaf
+  changes the merkle root → output key, separating it from board's, while
+  leaving the *expiry leaf itself* a stock `TimelockSign` clause. This is
+  the only mechanism that touches **no shared machinery**: the key-path is
+  still a single x-only taproot tweak (`tweaked_key_agg` unchanged), and the
+  marker is never a spendable clause — it appears only as a sibling hash in
+  the control block, which `vtxo.output_taproot().control_block(..)` computes
+  automatically, so the watchman/exit signers and the closed `VtxoClause`
+  enum are **untouched** (the whole diff is local to the channel policy's
+  `taproot()`/`clauses()`). Cost: +32 witness bytes (the sibling hash) in the
+  server's script-path expiry sweep, only on the rare
+  actualized-then-abandoned recourse path (the key-path bridge spend is
+  unaffected).
+  **Rejected alternatives, both because they touch shared machinery:**
+  *(i) mutate the expiry leaf* with a `<tag> OP_DROP` prefix — cheaper
+  (~+6 wu) and one-leaf, BUT the altered script is no longer a stock
+  `TimelockSign` clause, forcing a new/modified variant into the closed
+  `VtxoClause` enum and every exhaustive match on it (`watchman/signer.rs`,
+  the client exit signer, `policy.clauses()`); *(ii) internal-key ec-tweak*
+  — zero on-chain cost, but needs two-tweak signing variants across the
+  shared musig helpers, construction, and verification. There is no
+  cheaper-than-32 option that avoids touching either the clause enum or the
+  musig helpers; the marker leaf is the unique touch-nothing-shared choice.
   Pinned by a byte-**inequality** test vs a board funding output of the same
   keys/expiry (they must differ — the inverse of the old PV-2 claim), plus
   the §2d domain-separation test.
