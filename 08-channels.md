@@ -191,7 +191,7 @@ and the **bridge transaction** that spends it. The bridge's output is the
 Lightning funding output.
 
 ```
-   channel VTXO output: cosign taproot (musig(A,S), S, expiry)
+   channel VTXO output: taproot(musig(A,S); {expiry-sweep leaf, domain marker})
         │  (bridge transaction, presigned, held off-chain)
         ▼
    bridge tx ── out0: funding output = P2WSH 2-of-2 (BOLT-3 funding keys)
@@ -210,8 +210,17 @@ A channel VTXO's output carries the `channel-funding` policy (ARK #2, type byte
   `user_pubkey`, `S` = the VTXO's `server_pubkey`; ARK #2). This is the path the
   bridge transaction spends, and the path every cooperative spend of the
   VTXO uses;
-* a single leaf, timelock-sign `(expiry_height, S)` — the server's post-expiry
-  sweep.
+* the server's post-expiry sweep leaf, timelock-sign `(expiry_height, S)`;
+* a constant, unspendable **domain-marker leaf** with no spending semantics
+  (`OP_RETURN <C>`, `C` a fixed protocol constant). It exists only so that a
+  `channel-funding` output key is distinct from a board funding output's:
+  a distinct VTXO type carries a distinct, non-colliding output
+  construction, so a cosignature produced over one type's output can never
+  be valid for another's. It is never revealed on-chain (unspendable; only
+  its leaf hash contributes to the taproot).
+
+There is no user VTXO-level exit leaf: a channel VTXO's unilateral-exit
+delay rides on the bridge's input `nSequence`, not on a VTXO leaf.
 
 This is the **cosign taproot** `(musig(A, S), S, expiry_height)` of ARK #2 — a
 VTXO like any other. Two properties matter for channels:

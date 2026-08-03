@@ -119,9 +119,23 @@ ark-info advertisement *logic*, the attestation `channel_id` binding
   shared musig helpers, construction, and verification. There is no
   cheaper-than-32 option that avoids touching either the clause enum or the
   musig helpers; the marker leaf is the unique touch-nothing-shared choice.
+
+  **Exact marker (normative — must be pinned, not `<marker>`):** both leaves
+  at depth 1; leaf = the stock `timelock-sign(expiry, S)`; marker leaf =
+  tapscript `OP_RETURN <C>` at leaf version `0xc0`, where `C` is the fixed
+  32-byte constant `tagged_hash("ark/channel-funding-domain-v1", "")`
+  (BIP-340 tagged hash of the empty message). `OP_RETURN` makes the marker
+  provably unspendable (execution fails immediately — it can never leave a
+  truthy stack), and a single fixed `C` makes the output key identical
+  across implementations. The marker script is **never revealed on-chain**
+  (the leaf is unspendable; only its 32-byte leaf hash appears as the
+  sibling in the expiry sweep's control block), so its byte length is free —
+  the on-chain cost is the fixed 32-byte sibling regardless. The tree is
+  canonical (BIP-341 hash-sorted), so both parties derive the same root
+  independent of insertion order.
   Pinned by a byte-**inequality** test vs a board funding output of the same
   keys/expiry (they must differ — the inverse of the old PV-2 claim), plus
-  the §2d domain-separation test.
+  the §2d domain-separation tests.
 
 ### 2b. The admission invariant (the one behavior this MR adds)
 
@@ -278,7 +292,8 @@ Tests (upstream style; unit in-file, vectors in
 | exact `0x08 \|\| 33-byte-key` encoding + decode round-trip + kind strings | policy unit + vector |
 | unknown-tag rejection: a **`0xff`** blob (not `0x09` — the likely next allocation) | decode-failure unit |
 | taproot shape, no exit leaf, key-role separation (PV-1..4) | scriptpubkey hex vector, fixed keys/expiry |
-| **domain separation from board (§2d)**: channel-funding output key ≠ board funding output key for the same `(A,S,expiry)` | byte-**inequality** test (the inverse of the old PV-2 equality); assert a key-path signature over one output key does not validate against the other (distinct sighashes) |
+| **domain separation from board (§2d)**: channel-funding output key ≠ board funding output key for the same `(A,S,expiry)` | (1) exact marker/merkle-root/scriptPubKey **vector** (fixed keys/expiry, pins `C` and the output key across impls); (2) byte-**inequality** vs the board funding output (inverse of old PV-2); a key-path sig over one output key does not validate against the other (distinct sighashes) |
+| **marker leaf is unspendable + expiry still spendable (§2d)** | (3) the stock `TimelockSign` expiry spend succeeds with a **65-byte** control block (33 + the 32-byte marker sibling); (4) an attempted spend of the marker leaf fails (`OP_RETURN`) |
 | bridge shape + `verify_tx` (BR-1..6, PV-11) | field asserts + consensus `verify` of the funding-input spend |
 | determinism (BR-9) | two constructions byte-identical; pinned txid vector |
 | sighash + MuSig2 round-trip (BR-15/17) | sign both halves, aggregate, assert **one 64-byte DEFAULT witness**, schnorr-verify vs the tweaked output key; **reject a corrupted partial**; **funding-key-order independence** |
@@ -302,15 +317,23 @@ MR closes. The `ChannelAuthorization` builder parameter is compiler-forcing
 caller cannot exist without choosing an authorization); the forced-match
 policy arms (§2c) land in the same commit for the same reason.
 
+0. **Spec-track prerequisite (lands before or with commit 1):** update the
+   normative channel-VTXO-output construction for the domain marker —
+   `02-vtxo.md` and `08-channels.md` (the one-leaf → two-leaf change, framed
+   as new-type domain separation), matrix PV-2/PV-3, and any diagram. The
+   two parties must derive the same output key, so the marker (`OP_RETURN
+   <C>`, §2a) is normative, not an implementation detail.
 1. `lib, server: the channel-funding VTXO policy and its admission
-   invariant` — policy type + **domain-separated taproot (§2a/§2d — NOT
-   `cosign_taproot`)** + encoding + the full forced-match inventory (incl.
-   m0021) + the `ChannelAuthorization` builder parameter (all callers pass
-   `None`) + the round `validate_payment_amounts` refusal (both sub-paths) +
-   the offboard input refusal + policy/vector tests + the domain-separation
-   inequality + key-nonvalidity tests (§2d) + the before-mutation refusal
-   tests per arkoor caller (incl. the Lightning-pay input case) and both
-   round sub-paths and offboard.
+   invariant` — policy type + **domain-separated taproot (§2a/§2d — the
+   two-leaf {expiry, `OP_RETURN <C>`} construction, NOT `cosign_taproot`)** +
+   encoding + the full forced-match inventory (incl. m0021) + the
+   `ChannelAuthorization` builder parameter (all callers pass `None`) + the
+   round `validate_payment_amounts` refusal (both sub-paths) + the offboard
+   input refusal + policy/vector tests (incl. the exact marker/root/spk
+   vector) + the domain-separation inequality + key-nonvalidity + marker-
+   unspendable + expiry-spendable(65-byte control block) tests (§2d) + the
+   before-mutation refusal tests per arkoor caller (incl. the Lightning-pay
+   input case) and both round sub-paths and offboard.
 2. `lib: the presigned bridge transaction and its cosign helpers` —
    `channel.rs` + bridge/sighash/musig + `verify_tx` and the sign tests.
 3. `server-rpc, bark: optional channel fields on the arkoor cosign

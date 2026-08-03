@@ -167,10 +167,17 @@ ARK #8).
   used to forfeit, refresh, or cooperatively spend the VTXO
 * leaf: timelock-sign `(expiry_height, S)` — the server sweeps after expiry, when
   the VTXO's tree is left to time out
+* leaf: a constant, unspendable **domain-marker** (`OP_RETURN <C>`, `C` a
+  fixed protocol constant) — no spending semantics; see below
 
-This is the **cosign taproot** `(musig(A, S), S, expiry_height)` (see "Shared
-taproot constructions") — the same construction as a board funding output, with
-`A` = `user_pubkey`. It differs from `pubkey` in its leaf set: the user's
+Its cooperative key and expiry leaf are the same as a board funding output's,
+but it is **deliberately not** the bare board construction: it carries the
+domain-marker leaf so that its output key is distinct from a board funding
+output's for the same `(A, S, expiry_height)`. Domain-separating a distinct
+VTXO type this way means a cosignature produced over one type's output can
+never be a valid cosignature over another's. The marker is never revealed
+on-chain — it is unspendable, and only its leaf hash contributes to the
+taproot. It differs from `pubkey` in its leaf set: the user's
 `delayed-sign(exit_delta, A)` unilateral-exit leaf is dropped — a channel VTXO's
 unilateral-exit delay rides on the bridge transaction's input `nSequence`
 (ARK #8), not on a VTXO leaf — and the server's expiry leaf, which `pubkey` does
