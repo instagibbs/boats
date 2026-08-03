@@ -93,19 +93,19 @@ ark-info advertisement *logic*, the attestation `channel_id` binding
   to a board funding output; a distinct VTXO type with distinct spending
   rules should not reuse another type's exact output construction (§2d). The
   construction therefore adds a **constant channel-domain separator** so the
-  output key differs from a board funding output. **Proposed mechanism
-  (A):** a second, unspendable domain-marker tapleaf →
+  output key differs from a board funding output. **Mechanism (decided
+  2026-08-03):** a second, unspendable domain-marker tapleaf →
   `taproot(musig(A,S), {timelock-sign(expiry,S), <marker>})`. This changes
   the merkle root (hence the output key) with **no musig change** — the
   key-path is still a single x-only taproot tweak the existing
   `tweaked_key_agg` handles — at the cost of +32 witness bytes in the
   server's script-path expiry sweep (only on the rare
   actualized-then-abandoned recourse path; the key-path bridge spend is
-  unaffected). *Alternative (B), pending Greg's confirm:* domain-separate in
-  the internal key via a plain ec-tweak (`KeyAggCache::pubkey_ec_tweak_add`)
-  — zero on-chain cost, but needs two-tweak signing variants in the shared
-  musig helpers (`musig.rs` currently threads a single x-only tweak). See
-  §7 open item.
+  unaffected). (An internal-key ec-tweak was the considered alternative —
+  zero on-chain cost — but rejected: `musig.rs` threads a single x-only
+  tweak, so it would need two-tweak signing variants across the shared
+  signing helpers, construction, and verification — the heaviest-review
+  change; the marker leaf is cleaner and self-contained.)
   Pinned by a byte-**inequality** test vs a board funding output of the same
   keys/expiry (they must differ — the inverse of the old PV-2 claim), plus
   the §2d domain-separation test.
@@ -183,8 +183,8 @@ new type is to give it its own, non-colliding construction.
 **Requirement**: the `channel-funding` output key MUST differ from a board
 funding output's for the same `(A, S, expiry)`. This is a structural,
 stateless property, local to the channel-funding construction and
-independent of any server-side flow's behavior. Mechanism per §2a (A: marker
-leaf, or B: internal-key ec-tweak — §7). The channel's own legitimate spends
+independent of any server-side flow's behavior. Mechanism per §2a (the
+domain-marker tapleaf). The channel's own legitimate spends
 stay intact: the bridge/downgrade key-path use the channel taproot's tweak,
 and the server expiry sweep uses the (still-present) expiry leaf.
 
