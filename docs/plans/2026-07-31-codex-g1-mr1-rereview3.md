@@ -1,6 +1,6 @@
 # Verdict: REWORK
 
-The new builder/round approach is sound, but the claimed universal invariant misses one real VTXO mechanism: the board cosigner can presign a key-path spend of a future `ChannelFunding` outpoint.
+The new builder/round approach is sound, but the design must additionally domain-separate `ChannelFunding`'s output construction from a board funding output's: a distinct VTXO type with distinct spending rules should not reuse another type's exact taproot construction.
 
 ## Task-by-task verdict
 
@@ -43,20 +43,10 @@ With all constructor variants—including both `from_cosign_request` variants—
 
 There is no second delegated database writer or alternate tree/forfeit admission path.
 
-4. **Other VTXO mechanisms — FAIL: board cosign bypass**
+4. **Other VTXO mechanisms — domain-separation gap**
 
-The design deliberately makes `ChannelFunding` byte-identical to board funding outputs ([design note:88](/home/greg/bitcoin-dev/cleanroom/boats/docs/plans/2026-07-31-mr1-protocol-surface-design.md:88)). That exposes this attack:
-
-1. `request_board_cosign` accepts an arbitrary outpoint; no transaction or funding provenance is supplied ([ark.rs:171](/home/greg/bitcoin-dev/cleanroom/bark-stage1/server/src/rpcserver/ark.rs:171)).
-2. `cosign_board` validates amount, fee and expiry, then signs that outpoint without checking its origin ([server/src/lib.rs:691](/home/greg/bitcoin-dev/cleanroom/bark-stage1/server/src/lib.rs:691)).
-3. Board signing assumes exactly the same aggregate key, server expiry leaf, amount and expiry as `ChannelFunding` ([board.rs:44](/home/greg/bitcoin-dev/cleanroom/bark-stage1/lib/src/board.rs:44)).
-4. A user constructs a future upgrade arkoor transaction and knows its witness-independent txid/outpoint before obtaining arkoor signatures.
-5. The user first obtains a board cosignature for that future outpoint, then performs the authorized MR-2 upgrade using matching key, amount and expiry.
-6. Once the arkoor chain is published, the presigned board exit spends the `ChannelFunding` output immediately through its key path with `Sequence::ZERO` ([vtxo/mod.rs:314](/home/greg/bitcoin-dev/cleanroom/bark-stage1/lib/src/vtxo/mod.rs:314)), producing a user `Pubkey` VTXO instead of the balance-pinned bridge.
-
-A “reject currently known ChannelFunding outpoints” lookup is insufficient: board signing can occur first. The fix must be race-safe in both orderings—for example, proven board-funding provenance or durable outpoint reservation mutually exclusive with future `ChannelFunding` creation. Add a regression using a predicted future upgrade outpoint.
-
-Other audited mechanisms—VTXO pool issuance, LN settlement, expiry sweeps, offboard, and fixed-policy tree construction—do not provide a comparable bypass.
+The design had `ChannelFunding` share a board funding output's exact taproot
+construction ([design note:88](/home/greg/bitcoin-dev/cleanroom/boats/docs/plans/2026-07-31-mr1-protocol-surface-design.md:88)). A distinct VTXO type with distinct spending rules must not reuse another type's exact output construction — a cosignature produced over one type's output should not be able to validate against another's. Fix: give channel-funding its own domain-separated (non-colliding) taproot; a structural, stateless property. See the design note §2d for the mechanism (a constant unspendable domain-marker leaf). Other audited mechanisms — VTXO pool issuance, LN settlement, expiry sweeps, offboard, fixed-policy tree construction — need no comparable change.
 
 5. **MR-4 downgrade opt-in — PASS**
 
@@ -72,7 +62,7 @@ The sanctioned split is an OOR/arkoor spend, so passing `DowngradeInput` after s
 
 ## Severity-ranked findings
 
-1. **Blocker — board cosigning is a presigning oracle for future `ChannelFunding` outputs.**
+1. **Blocker — `ChannelFunding` must be domain-separated from a board funding output** (distinct VTXO type → distinct, non-colliding taproot construction; §2d).
 2. **Minor — §7 PV-9 and PV-6 rows remain stale.**
 3. **Minor — the note’s exhaustive arkoor-caller inventory omits server VTXO-pool delivery, although the builder invariant covers it.**
 
@@ -83,4 +73,4 @@ The sanctioned split is an OOR/arkoor spend, so passing `DowngradeInput` after s
 - LDK `v0.2.4` resolves to `b720a198…`; `make_funding_redeemscript` sorts the two serialized funding keys.
 - No files were modified.
 
-**Final verdict: REWORK.** Keep approach (b), but extend its perimeter to the board-cosigning mechanism with a race-safe prohibition.
+**Final verdict: REWORK.** Keep approach (b), and add domain separation of the channel-funding taproot from a board funding output (distinct type → distinct construction).
