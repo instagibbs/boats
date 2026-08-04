@@ -1,11 +1,16 @@
 # MR-3 design note (G1): captaind as the channel counterparty — the embedded-LDK channels subsystem
 
-**Status**: G1 rework (codex REWORK → this revision, 2026-08-04). The prior
-draft turned forwarding ON in this MR; the review showed that was both
-unimplementable with the named LDK knobs and premature (payments are part 4).
-This revision pulls forwarding out, restoring the plan's staging, and applies
-the review's other findings. Codex record:
-`docs/plans/2026-08-04-codex-mr3-g1-review.md`.
+**Status**: G1 rework r2 (codex rounds 1+2, both REWORK → this revision,
+2026-08-04). r1 pulled forwarding out; r2 established the deeper invariant
+(WD-16 → §3): **the server never unrolls**, so it cannot defend a
+preimage-claim on-chain and therefore holds **no live HTLCs** in stage 1 — all
+payment handling (endpoint *and* forwarding) is part 4 / stage 2. `F` is the
+exit-*possibility* floor, not an HTLC-race defense, and is *smaller* than the
+Ark-channel variant (no success-CSV term). All other r1/r2 findings (gate
+linearization, funding keys, SCID, watch, state machine, hardening, async
+processor) applied. Codex records:
+`docs/plans/2026-08-04-codex-mr3-g1-review.md` (r1),
+`…-mr3-g1-rereview.md` (r2, to be saved).
 **Series position**: part 3 of 6 upstream (internal "MR-2 captaind"), stacking
 on the protocol-surface MR (!2336) → the release-contract opener (!2321).
 **Baseline**: bark-stage1 `ark8-channels-stage1-protocol` (rebase to tip at
@@ -13,7 +18,8 @@ code-start). **Theme (plan:370)**: *captaind can be the channel counterparty.*
 **Spec targets**: IB-1..7 (upgrade path), PV-6/PV-8/PV-10 (server halves),
 BR-3/4/8/12/13/14/15/16/17/18, OP-1..7/14..16/18..28 (server view),
 RG-1..8/14..16, WD-2..5/15/16, EX-1/7, DA-1..10 (server + config guard),
-I-4/5/9/10 — full discharge table in §12. (I-6 forwarding floor: part 4.)
+I-4/5/9/10 — full discharge table in §12. (I-6 HTLC floors + all payment
+handling: part 4 / stage 2, §3.)
 
 ## 1. Scope: what this MR is, and the stage-1 cut it is drawn against
 
@@ -24,34 +30,33 @@ released LDK, admit an **open-by-upgrade** riding the arkoor cosign, hold
 `ChannelReady` until the Ark transfer is durably registered, cosign the
 presigned bridge, stand the parent-exit watch that defends the balance after
 the input is upgraded away, and sweep the channel VTXO at expiry. The channel
-is then a live, usable Lightning channel between the client and captaind.
+reaches operational state between the client and captaind.
 
-**captaind is an HTLC *endpoint*, not a *forwarder*, in this MR.** A client
-and captaind can pay each other over the channel — an ordinary Lightning
-HTLC where captaind is the terminal hop — and MR-3 tests exactly that
-(cooperative, off-chain settlement; §6a). What MR-3 does **not** do is
-*forward* (route A→captaind→B). Forwarding is where the deferred HTLC-race
-safety actually bites (§3), and the plan already places intra-ark payments —
-which are, by construction, captaind forwarding — in **part 4** alongside the
-per-HTLC CLTV floor. So forwarding ships **configured off** here; its safety
-layer (a static forwarding-CLTV ceiling, mandatory bridge retention, and a
-server-side HTLC-expiry force-close scheduler) is designed and built with
-part 4. Pulling it out of MR-3 is not a compromise — it restores the plan's
-staging.
+**MR-3 holds no live HTLCs (§3).** The server never unrolls (WD-16) and
+structurally can't (it holds only a bridge partial), so it cannot defend a
+preimage-claim on-chain — which means it cannot safely *receive*, *send*, or
+*forward* an HTLC in stage 1 without either the stage-2 success-CSV or
+directional operator policy + caps. All of that is the **part-4 / stage-2**
+HTLC-safety layer. So MR-3 ships **no production payments** — the channel
+opens, is defended, expires, and exits, but carries no money in flight.
+`accept_forwards_to_priv_channels = false`, and production HTLC send/receive is
+not enabled. A cooperative HTLC round-trip may run in the *test harness* as a
+mechanical operability check (§6a), never as a shipped capability. This is not
+a narrowing of the plan — payments were always part 4.
 
 **In scope**: the `[channels]` `OptionalService` subsystem; LDK node
 assembly + persistence + event loop; the open-by-upgrade admission path (the
 server half of the two-sided checks); the registration gate; the bridge
 cosign integration; the parent-exit watch; the expiry sweep arm; the
 `max_vtxo_exit_depth` config-decrease guard; `supports_channels` advertised
-true when enabled; cooperative client↔captaind payments as a usability
-proof.
+true when enabled.
 
 **Out of scope**, and the note keeps clear of each:
-- **Forwarding + intra-ark payments (A→captaind→B)** — part 4, with the
-  forwarding-safety layer above. captaind's LDK `UserConfig` sets
-  `accept_forwards_to_priv_channels = false` and no channel is configured to
-  route; the subsystem accepts and terminates HTLCs but does not relay them.
+- **All HTLCs / payments (endpoint receive, endpoint send, forwarding)** —
+  part 4 / stage 2, with the HTLC-safety layer (§3). captaind's LDK
+  `UserConfig` sets `accept_forwards_to_priv_channels = false` and payments are
+  not enabled; the node opens and defends channels but moves no HTLCs in
+  production.
 - **The bark client open flow and unilateral exit e2e** — part 4. This MR
   builds the server half and proves it against a test driver, not the
   production client. (Unilateral *exit* recourse the server owns — expiry
@@ -70,10 +75,12 @@ proof.
 - **The Ark channel type / HTLC-success-CSV asymmetry** — stage 2 (the LDK
   fork). Stage-1 captaind negotiates a **stock** channel type
   (`anchors_zero_fee_commitments`) and refuses any other; it does NOT gate on
-  an `ark_channel` feature bit (there is none). The HTLC expiry-race safety
-  the fork's CSV asymmetry would give is what makes safe *forwarding* hard —
-  which is the direct reason forwarding waits for part 4, where the safety
-  layer is designed against this constraint (and may require the fork).
+  an `ark_channel` feature bit (there is none). The success-CSV is the
+  structural defense that lets a party which *cannot force-close early* — the
+  server, by WD-16 — still win an on-chain HTLC-success race. Without it, safe
+  server HTLC-holding needs directional policy + caps or the fork itself; this
+  is precisely why **all** HTLC handling (not just forwarding) is deferred
+  (§3), and it may genuinely require the stage-2 fork rather than policy alone.
 
 **The reference implementation is mined, not ported.** The old branch
 (`ark-channels-bridge-2026-06-18`, server side in `server/src/ldk/*` +
@@ -180,32 +187,54 @@ confirmations, SCID allocations, and watch resolutions above the fork. The
 capture broadcaster and the parent-exit response share the existing
 tx-nursery / P2A-CPFP machinery.
 
-## 3. The two-sided invariant, and captaind's HTLC role
+## 3. The two-sided invariant, WD-16, and why MR-3 holds no HTLCs
 
 Every open-time check in the spec is enforced **from each party's own view**
 ("the client MUST refuse to build, and the server MUST refuse to cosign",
 spec:438-440). This MR is the **server** half; the client half is part 4.
 Neither half trusts the other. Both sides pass `ChannelAuthorization::
 UpgradeOutput` into the MR-1 builder — the client when it *builds* the
-transfer, captaind when it re-derives from the cosign request (corrected: the
-prior draft wrongly called captaind the sole `UpgradeOutput` caller).
+transfer, captaind when it re-derives from the cosign request.
 
-**captaind's HTLC role in MR-3.** captaind may be the **terminal hop** of an
-HTLC on a channel — it can receive a payment from its client, and send one to
-its client — and this is the usability MR-3 proves (§6a). It does **not
-forward**. Two consequences:
-- captaind enforces its own **receive** CLTV floor without needing the
-  forwarding machinery: it sets `min_final_cltv_expiry` on invoices it issues,
-  and rejects any inbound HTLC whose CLTV is below its floor at the channel
-  level (the HTLC's CLTV is visible before the HTLC is irrevocably committed,
-  independent of the spontaneous-payload exposure timing that defeats a
-  post-hoc keysend check). Whether captaind accepts keysend/spontaneous
-  receipt at all is a config choice; if it does, the same pre-commit CLTV
-  floor applies.
-- captaind never holds the forwarder's "paid the outbound leg, inbound leg
-  stuck" obligation, because it never forwards. That obligation (I-6d, and the
-  force-close-to-recover it demands) is the part-4 forwarding layer's, and is
-  the substantive reason D2/D3 below are safe *for this MR*.
+**The load-bearing invariant: the server never unrolls (WD-16).** *"The server
+never unrolls a tree on its own initiative; its only self-initiated on-chain
+act is the post-expiry sweep"* (matrix WD-16 → spec:1605-1614, user-stories:
+149-152). Structurally the server *cannot* unroll even if it wanted to: the
+bridge is a one-shot MuSig2 keyspend and the server only ever holds a partial;
+the client aggregates and keeps the completed bridge (spec ordering step 6).
+So the server's on-chain recourses are exactly two, **neither an unroll**:
+1. its **ChannelMonitor claims from the counterparty's own force-close** — if
+   the client goes on-chain, the *client* unrolls (it has the bridge) and the
+   server's monitor claims its output from the landed commitment;
+2. the **whole-output expiry sweep** via the `timelock-sign(expiry, S)` leaf on
+   the channel VTXO output (above the bridge) — the ultimate backstop.
+
+**Why this means MR-3 holds no live HTLCs.** The standard-Lightning defense for
+a party that holds a preimage and must beat a counterparty's timeout is to
+force-close *early* and claim with margin. The server cannot do that (WD-16:
+it can't unroll). So for any HTLC where the server is the preimage-holder that
+must claim before a client-controlled timeout — i.e. every *receive* and every
+*forward* — a client can stall to the HTLC's CLTV, then force-close and race
+its timeout against the server's success on the just-landed commitment. In
+stage 1 there is **no success-CSV** to give the server a structural window, and
+a bigger CLTV floor does not help: it only moves the deadline the attacker
+waits for. The server is exposed for the HTLC principal in that direction, and
+the fix is not server machinery (that would violate WD-16) but either the
+**stage-2 success-CSV** (the real structural defense for a party that can't act
+early), **directional operator policy** (never put the server in the
+must-claim-before-client-timeout position — "ban/scope client receives"), or
+**bounded griefing caps** (accept a small capped loss). All three are the
+**part-4 / stage-2** HTLC-safety layer. Therefore MR-3 ships **no production
+HTLC send or receive**; captaind's LDK node never originates or claims a
+payment in production. The channel opens, is defended, expires, and exits —
+economically inert until the safety layer lands. This is not a narrowing of
+the plan; payments were always part 4.
+
+MR-3 *may* still exercise a **cooperative** HTLC round-trip in the test harness
+(§6a) — a purely off-chain settle that touches no commitment, second stage, or
+race — to prove the gate yields an operational channel. That is a mechanical
+operability check, explicitly **not** a shipped capability and **not** a safety
+claim.
 
 ## 4. Open by upgrade — the flow captaind participates in
 
@@ -369,14 +398,20 @@ floor. Checks 1–12 were validated against the spec by the review:
     resulting depth ≤ `channel_max_vtxo_exit_depth − 2`, reserving a worst-case
     checkpointed downgrade split cosignable for the channel's whole life (no
     refresh remedy in stage 1). The review confirmed the `max−2` retention.
-11. **Runway vs floor F** (OP-15, I-4/5): remaining runway
+11. **Runway vs the exit-possibility floor F** (OP-15, I-4/5): remaining runway
     (`expiry_height − real tip`) MUST exceed the server's computed
     **`F = channel_max_vtxo_exit_depth + pinned_exit_delta + cltv_claim_slack`**.
-    The review confirmed the **`1× pinned_exit_delta`** term is correct and
-    that the reference branch's second `exit_delta` belonged to the excluded
-    HTLC-success CSV — it MUST NOT be carried into stage 1. Checked arithmetic
-    + u16-representability guard (F feeds BOLT `cltv_expiry_delta` fields). The
-    numeric `cltv_claim_slack` is D5 (§8).
+    F is the **exit-possibility floor**, not an HTLC-race defense (§3, §8): it
+    guarantees the channel can be unrolled/exited before expiry at all — the
+    exit-chain climb (up to `channel_max_vtxo_exit_depth` genesis levels, ~1
+    block each) plus the bridge's `pinned_exit_delta` CSV must fit inside the
+    runway. The **`1× pinned_exit_delta`** term is correct: the reference
+    branch's second `exit_delta` was the HTLC-success CSV, excluded in stage 1,
+    so **stage-1 F is smaller than the Ark-channel-variant floor by exactly one
+    `pinned_exit_delta`** (the variant is `depth + 2·pinned_exit_delta + slack`,
+    spec:1291). Checked arithmetic + u16-representability guard (F feeds BOLT
+    `cltv_expiry_delta` fields). The numeric `cltv_claim_slack` is a small fixed
+    confirmation/fee-bump margin (D5, §8), NOT a depth-scaled value.
 12. **Bridge reconstruction + funding-outpoint cross-check** (BR-18, OP-25):
     reconstruct the bridge with `lib::channel::bridge_tx`; assert the two
     equalities — the LDK-assigned funding outpoint (from `ChannelPending`) ==
@@ -391,15 +426,16 @@ transition the channel to `cosigned` (§6b). BR-17: fresh nonce per session;
 the byte-identical duplicate is re-signed with a fresh nonce (documented
 stage-1 conformance deviation, spec:2007-2010 — no store-and-replay).
 
-**Usability proof — cooperative client↔captaind payment (in-scope test).**
-Once a channel is registered and released, the server-side e2e drives an
-ordinary bidirectional HTLC exchange between captaind and the test client
-(client→captaind and captaind→client), settled off-chain by preimage. This
-proves the gate yields a *usable* channel — not merely an opened one — with
-captaind as the terminal hop and **no forwarding, no on-chain action**. The
-adversarial/force-close-with-pending-HTLC paths stay with the exit tests and
-are framed as stock-behavior documentation, not stage-1 safety proofs
-(that is the deferred CSV territory).
+**Operability check — cooperative HTLC round-trip (test harness only).** Once a
+channel is registered and released, the harness may drive a **cooperative**
+bidirectional HTLC exchange with the test client, settled off-chain by
+preimage — no commitment, second stage, or on-chain action. This proves the
+gate yields an *operational* channel (HTLCs move), not merely an opened one. It
+is explicitly a **mechanical operability check, not a shipped capability and
+not a safety claim**: production HTLC send/receive is not enabled in MR-3
+(§3 — the server cannot defend a preimage-claim on-chain without unrolling,
+which WD-16 forbids; that safety is the part-4/stage-2 layer). The adversarial
+force-close-with-pending-HTLC behavior belongs to part 4.
 
 ### 6b. The durable open state machine (review F4)
 
@@ -476,7 +512,7 @@ offboard-forfeit watcher's TxIndex / nursery / wallet. The response
 actualizes only the channel-VTXO (or checkpoint parent) level; the bridge and
 commitment are untouched (WD-4).
 
-## 8. Expiry, the config guard, and the retained decisions
+## 8. Expiry, the config guard, and the permanent no-unroll invariants
 
 - **Expiry sweep (EX-1/7)**: the `timelock-sign(expiry_height, S)` leaf is the
   server's recourse when the user actualized the channel VTXO output but left
@@ -490,34 +526,40 @@ commitment are untouched (WD-4).
   (or require closure first), and MUST enforce `max_vtxo_exit_depth ≥ 2`.
   Checked at config-load and across restart. This is the one DA-8..10 piece
   this MR owns; the downgrade eligibility check is part 5.
-- **D2 (no server-side force-close scheduler) — stands, and is now safe for
-  this MR.** With forwarding out, captaind never holds a "paid-outbound /
-  stuck-inbound" obligation (§3), and cooperative payments never go on-chain.
-  Its defenses — the parent-exit watch and the expiry sweep — plus the client's
-  own exit discipline cover every in-scope case. (The forwarder's I-6d
-  scheduler is part 4.)
-- **D3 (keep the close outcome, not the bridge) — stands for this MR.** Nothing
-  in MR-3 requires captaind to self-actualize a channel: the client actualizes
-  on unilateral exit (it holds the bridge), and captaind's expiry sweep uses
-  the expiry leaf, not the bridge. Mandatory bridge retention arrives with the
-  part-4 forwarding layer, where the force-close-to-recover path needs it.
-- **D5 — `cltv_claim_slack`, the runway-floor slack.** Still MR-3's (the runway
-  admission, check 11, is at open regardless of payments). `F` is computed from
-  captaind's own view, independent of the client's. The review proposed a
-  depth-derived default; before fixing the number the **confirmation model**
-  must be settled — specifically whether the pre-signed exit chain rides to the
-  commitment as a single TRUC/CPFP package (in which case the slack does not
-  scale with depth × per-tx confirmations) or serially (in which case it does).
-  Proposal: pick an operational confirmation target `C` (≈ the conf/claim
-  margin the offboard/forfeit paths already assume), define
-  `cltv_claim_slack` from the *package* model as `C + processing_grace`
-  (a small constant, since depth is already the `channel_max_vtxo_exit_depth`
-  term of `F` and the chain confirms as a package), and record the alternative
-  serial-model figure (codex's `(C−1)·D + 3C + 3`, ≈1757 at `D=100`) as the
-  conservative upper bound if the package assumption is wrong. **Resolve with a
-  concrete integer + the model justification before code-start**; F must remain
-  safe for the eventual part-4 HTLC path, so a pending-HTLC second-stage term
-  is included even though MR-3 itself settles cooperatively.
+- **D2 (no server-side force-close scheduler) — a PERMANENT invariant, not an
+  MR-3 convenience.** The server never force-closes/unrolls (WD-16, §3);
+  structurally it can't (it holds only a bridge partial). Its recourses are the
+  monitor-claim from the counterparty's own force-close and the expiry sweep.
+  No server-side force-close/unroll scheduler is built in MR-3, part 4, or ever
+  — the earlier "part-4 I-6d scheduler" framing was a mis-derivation from a
+  review finding that measured against standard Lightning; the Ark design
+  rejects server unroll outright.
+- **D3 (the server never retains/actualizes the bridge) — also PERMANENT.**
+  Only the *client* holds the completed bridge and unrolls; the server's expiry
+  sweep uses the expiry leaf on the channel VTXO output (above the bridge),
+  never the bridge itself. captaind stores the close *outcome*, not the bridge.
+  (The part-4 HTLC-safety layer does **not** reverse this — safe server HTLC
+  participation comes from the stage-2 success-CSV and/or directional policy +
+  caps, §3, not from teaching the server to unroll.)
+- **D5 — `cltv_claim_slack`, and the size of `F`.** `F` is the exit-possibility
+  floor (§6, check 11), computed from captaind's own view. The exit chain does
+  not blow up the slack: each genesis level is a TRUC (v3) tx confirmed by its
+  own P2A CPFP and relayed level-by-level as its parent confirms — **~1 block
+  per level**, not one giant package (codex is right that the whole chain can't
+  be one `submitpackage` — parents can't depend on each other — but that means
+  it confirms *serially at one level per block*, which the `depth` term of `F`
+  already captures; it does **not** mean each level must be buried to `C`
+  confirmations). So `cltv_claim_slack` is a **small fixed margin** for
+  confirmation variance + fee-bump rounds + processing grace — on the order of
+  the conf/claim margin the offboard/forfeit paths already use (~10–20 blocks),
+  **not** codex's depth-scaled ≈1757. Concretely at the defaults
+  (`depth = 100`, `pinned_exit_delta = 144`): `F ≈ 100 + 144 + ~18 ≈ 262`, and —
+  as expected — **less than the Ark-channel variant's `100 + 288 + ~18 ≈ 406`**
+  by one `pinned_exit_delta`. There is **no** pending-HTLC second-stage term in
+  stage-1 `F` (no success CSV, and no server HTLC-claim on-chain — WD-16);
+  that term is exactly what the stage-2 variant adds. Fix the concrete integer
+  (proposed `cltv_claim_slack = 18`) at code-start against the actual
+  offboard/forfeit margin constants; checked arithmetic + u16 guard.
 
 ## 9. Config surface
 
@@ -609,7 +651,7 @@ deferred by design.)*
 | PV-8 | `supports_channels` = `channels.enabled()` (§2a) |
 | PV-10 | suite green subsystem-off and -on for non-channel flows (T) |
 | BR-3/4/8 | pinned_exit_delta stored-once/never-reread; negotiated-amount equality (§6.8-9) |
-| BR-12/13 | keep close outcome, not bridge — bridge retention is part 4 (D3) |
+| BR-12/13 | keep close outcome, not bridge — the server never retains/actualizes the bridge, permanent (D3, WD-16) |
 | BR-14 | LDK-derived per-channel funding keys, persisted redeem script; distinct from A/S (§2c) |
 | BR-15/16/18 | one-shot bridge cosign; commitment via stock 2-of-2; reconstruct + equalities (§6.12) |
 | BR-17 | fresh nonce/session; duplicate re-signed (stage-1 nit, §6) |
@@ -628,7 +670,7 @@ deferred by design.)*
 | DA-1..7 | published-bound refusal (S); resulting-depth + `max−2` split headroom (§6.10) |
 | DA-8..10 | config-decrease guard only (§8); eligibility check is part 5 |
 | I-4/5 | floor F at runway admission — spec `1×` formula (§6.11) |
-| I-6 | forwarding floor + received/invoice/force-close floors — **part 4** (captaind's own receive floor via invoice min_final_cltv is §3) |
+| I-6 | all per-HTLC floors (forwarding delta, received, invoice, force-close scheduling) — **part 4 / stage 2**; MR-3 holds no HTLCs (§3) |
 | I-9 | config-decrease guard, `≥ 2`, across restart (§8) |
 | I-10 | virtual-confirmation fail-closed + persisted bridge-txid SCID synthesis, scid_privacy (§5) |
 
@@ -663,35 +705,42 @@ Server-side e2e (real captaind + a test driver for the part-4 client) proves:
 open-by-upgrade happy path; each admission refusal (runway, depth/headroom,
 amount, pinned-delta, exiting-input, unknown channel_id, missing bridge);
 not-ready-before-registration; the linearized late-registration refusal;
-**cooperative bidirectional client↔captaind payment** (usability, §6a);
-parent-exit watch arm + response + reorg reopen; expiry sweep; config-decrease
-guard across restart; concurrent opens (the deadlock regression);
-crash-before-first-feed SCID recovery. Mine the old branch's `barkd_*`
-scenario names for coverage parity, minus forwarding/teleport/downgrade.
+a **cooperative HTLC round-trip** as a mechanical operability check (§6a — not
+a shipped capability); parent-exit watch arm + response + reorg reopen; expiry
+sweep; config-decrease guard across restart; concurrent opens (the deadlock
+regression); crash-before-first-feed SCID recovery. Mine the old branch's
+`barkd_*` scenario names for coverage parity, minus forwarding/teleport/
+downgrade and minus anything asserting adversarial HTLC safety (part 4).
 
 ## 14. Decisions (resolved) and residuals
 
 - **D1 (event driver)** — RESOLVED: async `lightning-background-processor`
   0.2.3 `process_events_async` + a small postgres `KVStore` for the singleton
   manager; custom monitor `Persist` retained (§2c).
-- **D2 (no server force-close scheduler)** — STANDS, now safe: forwarding is
-  out, so captaind carries no forwarder obligation; defenses are the watch +
-  expiry sweep (§8).
-- **D3 (keep close outcome, not bridge)** — STANDS for this MR; bridge
-  retention moves to part-4 forwarding (§8).
-- **Forwarding** — REMOVED from MR-3 (was the prior D4); restored to part 4
-  with its safety layer (static forwarding-CLTV ceiling, mandatory bridge
-  retention, I-6d force-close scheduler). captaind ships `accept_forwards…
-  = false`.
+- **D2 (no server force-close scheduler)** — PERMANENT invariant: the server
+  never unrolls (WD-16); recourses are monitor-claim + expiry sweep (§3, §8).
+  No such scheduler is ever built.
+- **D3 (server never retains/actualizes the bridge)** — PERMANENT invariant
+  (§8). The client holds the completed bridge and is the only party that
+  unrolls; the server keeps the close outcome, not the bridge.
+- **HTLCs / payments** — NOT in MR-3. The server can't defend a preimage-claim
+  on-chain without unrolling (WD-16), so no production HTLC send/receive ships;
+  the HTLC-safety layer (stage-2 success-CSV and/or directional policy + caps —
+  **not** server unroll machinery) is part 4 / stage 2 (§3). captaind ships
+  `accept_forwards_to_priv_channels = false` and does not enable payments.
 - **Funding keys** — RESOLVED: LDK-derived per-channel, not `S` (§2c, BR-14).
 - **Watcher availability** — RESOLVED: always-on embedded watcher; not gated on
   the optional `watchman` service (§2a/§7).
-- **SCID privacy** — RESOLVED: `negotiate_scid_privacy = true`, persisted
-  allocation, collision-fatal (§5).
-- **D5 (`cltv_claim_slack` default)** — RESIDUAL, must resolve before
-  code-start: settle the confirmation model (package vs serial), then fix a
-  concrete integer (§8). Package model → small constant; serial model →
-  codex's ≈1757 upper bound.
+- **SCID privacy** — RESOLVED: `negotiate_scid_privacy = true` (the client/funder
+  must set it), synthetic index in the `2500..2²⁴` band (LDK aliases use
+  `0..2499`), persisted allocation, collision-fatal vs real + alias SCIDs (§5).
+- **D5 (`cltv_claim_slack` / size of F)** — RESOLVED to a **small fixed margin**
+  (proposed `18`), giving `F ≈ 262` at the defaults — *less* than the
+  Ark-channel variant's `≈406` by one `pinned_exit_delta`, since stage-1 carries
+  no success-CSV term. codex's serial `≈1757` is rejected: it buried each
+  genesis level to `C` confirmations; the chain confirms one level per block
+  (§8). Pin the exact integer to the offboard/forfeit margin constant at
+  code-start.
 - **Boundary** — the plan's §7 owner table predates the MR-1 shape-bounding
-  fold and this forwarding move; this note treats OP-2's shape as done in MR-1
-  and I-6 forwarding as part 4. Recorded so scope isn't re-litigated.
+  fold and this HTLC-scoping; this note treats OP-2's shape as done in MR-1 and
+  all HTLC/forwarding (I-6) as part 4. Recorded so scope isn't re-litigated.
