@@ -136,7 +136,7 @@ path dep. Server-native glue lives in `server/src/channels/` (mirroring
 | `channels/broadcaster.rs` | capture-only broadcaster over the tx nursery | `common::CaptureBroadcaster` |
 | `channels/event.rs` | `process_events_async` driver; close recording | `common::spawn_event_pump` |
 | `channels/admission.rs` | open-by-upgrade admission (§6), the arkoor-cosign server half | old `cosign_oor_upgrade` |
-| `channels/confirm.rs` | virtual-confirmation feed + SCID allocator (§5), the idempotent release outbox | old `feed_tx_confirmation` (with the collision bug fixed) |
+| `channels/confirm.rs` | virtual-confirmation feed + SCID allocator (§5), the level-triggered release reconciler | old `feed_tx_confirmation` (with the collision bug fixed) |
 | `channels/watch.rs` | parent-exit watch arm (§7) | old `ForfeitWatcher` parent-watch |
 | `server/src/database/channels.rs` | `impl Tx` blocks for the new tables (§10) | old `database/ldk.rs` (minus teleport) |
 | `lib/src/channel.rs` | (exists, MR-1) bridge construct/sighash/cosign | — |
@@ -199,7 +199,7 @@ confirmations, SCID allocations, and watch resolutions above the fork. The
 capture broadcaster and the parent-exit response share the existing
 tx-nursery / P2A-CPFP machinery.
 
-## 3. The two-sided invariant, WD-16, and why MR-3 holds no HTLCs
+## 3. The two-sided invariant, WD-16, and why MR-3 originates/claims no payments
 
 Every open-time check in the spec is enforced **from each party's own view**
 ("the client MUST refuse to build, and the server MUST refuse to cosign",
@@ -230,11 +230,13 @@ or above the channel VTXO output**, never a bridge unroll:
    channel VTXO output, so it is not a bridge unroll — it is why the invariant
    is stated as "never *initiates a bridge* unroll," not "never broadcasts.")
 
-**Why this means MR-3 originates and claims no HTLCs.** Because captaind never
-initiates a bridge unroll, it can never force-close *early* to win a
-preimage-vs-timeout race — the standard-Lightning defense for a party that
-holds a preimage and must beat a counterparty's timeout. So captaind must
-never be the party holding a preimage under deadline: it **never claims an
+**Why this means MR-3 originates and claims no payments.** Because captaind
+never initiates a bridge unroll, it can never force-close *early* to win a
+preimage-vs-timeout race — the standard-Lightning defense for a party that must
+enforce a preimage claim on-chain against a counterparty's timeout. The danger
+is not *knowing* a preimage (a keysend `PaymentClaimable` even hands captaind
+the sender's preimage) but **claiming/fulfilling** with it — that is what puts
+captaind in the race it can't win. So captaind **never claims/fulfills an
 inbound HTLC and never originates one.** Making the CLTV floor bigger does not
 help — it only moves the deadline a staller waits for. Safe server HTLC
 participation is deferred wholesale to **part 4 / stage 2**, whose tools are the
@@ -488,10 +490,14 @@ stage-1 conformance deviation, spec:2007-2010 — no store-and-replay).
 **Operability check — cooperative HTLC round-trip (test harness only).** Once a
 channel is registered and released, the harness may drive a **cooperative**
 bidirectional HTLC exchange with the test client, settled off-chain by
-preimage — no commitment, second stage, or on-chain action. This proves the
-gate yields an *operational* channel (HTLCs move), not merely an opened one. It
-is explicitly a **mechanical operability check, not a shipped capability and
-not a safety claim**: production HTLC send/receive is not enabled in MR-3
+preimage. A cooperative settle *does* update and sign new commitments and HTLC
+second-stage transactions; "cooperative/clean" means **none is broadcast and no
+on-chain/CSV path executes** (and the test waits through the final
+`revoke_and_ack`, which the harness notes can lag `PaymentClaimed`). This proves
+the gate yields an *operational* channel (HTLCs move), not merely an opened one.
+It is explicitly a **mechanical operability check, not a shipped capability and
+not a safety claim** (and it drives the very `claim_funds`/`send` paths
+production disables): production HTLC send/receive is not enabled in MR-3
 (§3 — the server cannot defend a preimage-claim on-chain without unrolling,
 which WD-16 forbids; that safety is the part-4/stage-2 layer). The adversarial
 force-close-with-pending-HTLC behavior belongs to part 4.
@@ -614,9 +620,14 @@ commitment are untouched (WD-4).
   LDK's own view — **not** an Ark bridge unroll), and **capture-and-suppress**
   the resulting commitment/HTLC broadcasts in the capture broadcaster (they
   spend an off-chain-only funding output and can never relay — the same
-  suppression the cooperative-close path already uses, §11.4), persist the
-  manager, and release the channel's watches and fee-bump reserve. Covered by
-  an expiry-then-restart test (the terminal state survives and is not re-driven).
+  suppression the cooperative-close path already uses, §11.4; and the
+  `BumpTransactionEvent`s the logical force-close emits are likewise suppressed),
+  persist the manager, and release the channel's watches and fee-bump reserve.
+  Because `terminal_at` and the manager snapshot are separate durable writes,
+  the terminal transition is **level-triggered like the release (§5)**: a
+  reconciler re-drives the logical close until the restored manager no longer
+  contains the channel. Covered by expiry-then-restart tests with crash
+  injection before/after the force-close and before/after manager persistence.
 - **Config-decrease guard (I-9)**: the server MUST refuse a `max_vtxo_exit_depth`
   config decrease that would strand a live channel past downgrade eligibility
   (or require closure first), and MUST enforce `max_vtxo_exit_depth ≥ 2`.
@@ -744,11 +755,16 @@ Added by the review (F8):
    parent-exit response plus one expiry sweep per live channel: reserve
    confirmed UTXOs per live channel at `accept_inbound_channel`, key them by the
    broadcast's `claim_id` so **rebumps of the same package reuse the same
-   reserved UTXOs** (never double-spend the reserve), and **release** the
-   reservation only after the package confirms or the channel reaches its
-   terminal transition (§8). The **Core v29+/TRUC** relay requirement is stated
-   (the P2A/zero-fee package path needs it). Concrete reserve-sat and
-   max-feerate numbers are sized at code-start from the package weights.
+   reserved UTXOs** (never double-spend the reserve). The parent-exit and expiry
+   tranches release independently: the **expiry tranche is retained even after a
+   parent-exit response confirms** (a channel whose input was forfeited can
+   still reach expiry and need its sweep bumped), and each tranche releases only
+   after its own package confirms or the channel reaches its terminal transition
+   (§8). The **`BumpTransactionEvent`s emitted by the logical terminal
+   force-close are suppressed**, not funded from the reserve (§8 — those
+   broadcasts can never relay). The **Core v29+/TRUC** relay requirement is
+   stated. Concrete reserve-sat and max-feerate numbers are sized at code-start
+   from the package weights.
 10. **Foreign-input-safe bump PSBT signing** (reference `6edd047f7`) — a mixed
     bump PSBT signs only wallet-owned inputs, leaving the LDK channel input for
     the channel signer.
@@ -787,7 +803,7 @@ deferred by design.)*
 | DA-1..7 | published-bound refusal (S); resulting-depth + `max−2` split headroom (§6.10) |
 | DA-8..10 | config-decrease guard only (§8); eligibility check is part 5 |
 | I-4/5 | floor F at runway admission — spec `1×` formula (§6.11) |
-| I-6 | all per-HTLC floors (forwarding delta, received, invoice, force-close scheduling) — **part 4 / stage 2**; MR-3 holds no HTLCs (§3) |
+| I-6 | all per-HTLC floors (forwarding delta, received, invoice, force-close scheduling) — **part 4 / stage 2**; MR-3 originates/claims no payments (§3) |
 | I-9 | config-decrease guard, `≥ 2`, across restart (§8) |
 | I-10 | virtual-confirmation fail-closed + persisted bridge-txid SCID synthesis, scid_privacy (§5) |
 
@@ -813,7 +829,7 @@ skills).
    reconstruct + cosign + the two equalities, channel-state persist. Channel
    opens but is not usable until the gate releases (stage 4).
 4. **The linearized gate + watch + expiry + guard** — confirmation-injection
-   release via the idempotent outbox on committed registration, the SCID
+   release via the level-triggered reconciler on committed registration, the SCID
    allocator, the parent-exit watch (arm/detect/respond/resolve incl. the
    ancestor-sweep terminal condition + reorg reopen), the watchman expiry arm,
    the config-decrease guard.
