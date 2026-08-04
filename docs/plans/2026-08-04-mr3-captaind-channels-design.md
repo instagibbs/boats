@@ -1,10 +1,11 @@
 # MR-3 design note (G1): captaind as the channel counterparty — the embedded-LDK channels subsystem
 
-**Status**: G1 rework r2 (codex rounds 1+2, both REWORK → this revision,
-2026-08-04). r1 pulled forwarding out; r2 established the deeper invariant
-(WD-16 → §3): **the server never unrolls**, so it cannot defend a
-preimage-claim on-chain and therefore holds **no live HTLCs** in stage 1 — all
-payment handling (endpoint *and* forwarding) is part 4 / stage 2. `F` is the
+**Status**: G1 rework r3 (codex rounds 1–3, all REWORK → this revision,
+2026-08-04; r3 findings were precision/completeness, no scope change). r1 pulled forwarding out; r2/r3 established the deeper invariant
+(WD-16 → §3): **captaind never initiates a bridge unroll** (a no-retention
+profile choice, and it holds only a bridge partial), so it cannot defend a
+preimage race and therefore **originates and claims no production payments** in
+stage 1 — all payment handling (endpoint *and* forwarding) is part 4 / stage 2. `F` is the
 exit-*possibility* floor, not an HTLC-race defense, and is *smaller* than the
 Ark-channel variant (no success-CSV term). All other r1/r2 findings (gate
 linearization, funding keys, SCID, watch, state machine, hardening, async
@@ -32,17 +33,22 @@ presigned bridge, stand the parent-exit watch that defends the balance after
 the input is upgraded away, and sweep the channel VTXO at expiry. The channel
 reaches operational state between the client and captaind.
 
-**MR-3 holds no live HTLCs (§3).** The server never unrolls (WD-16) and
-structurally can't (it holds only a bridge partial), so it cannot defend a
-preimage-claim on-chain — which means it cannot safely *receive*, *send*, or
-*forward* an HTLC in stage 1 without either the stage-2 success-CSV or
-directional operator policy + caps. All of that is the **part-4 / stage-2**
-HTLC-safety layer. So MR-3 ships **no production payments** — the channel
-opens, is defended, expires, and exits, but carries no money in flight.
-`accept_forwards_to_priv_channels = false`, and production HTLC send/receive is
-not enabled. A cooperative HTLC round-trip may run in the *test harness* as a
-mechanical operability check (§6a), never as a shipped capability. This is not
-a narrowing of the plan — payments were always part 4.
+**MR-3 originates and claims no production payments (§3).** captaind never
+initiates a bridge unroll (WD-16 profile + it holds only a bridge partial), so
+it can never force-close early to defend a preimage-vs-timeout race — meaning
+it must never hold a preimage under deadline. So it **never claims an inbound
+HTLC and never originates one**: no send/invoice API, never `claim_funds`,
+`fail_htlc_backwards` on every `PaymentClaimable`, `push_msat == 0` + no
+dual-funded opens, `accept_forwards_to_priv_channels = false`. (Stock LDK can
+still momentarily *commit* an inbound HTLC before exposing it — absolute
+pre-commit rejection needs a fork hook — but failing every claimable back is
+sufficient, since exposure only arises from claiming.) Safe server HTLC
+handling — the stage-2 success-CSV and/or directional policy + caps, **not**
+server unroll machinery — is the **part-4 / stage-2** layer. So the channel
+opens, is defended, expires, and exits, carrying no money in flight. A
+cooperative HTLC round-trip may run in the *test harness* as a mechanical
+operability check (§6a), never as a shipped capability. This is not a narrowing
+of the plan — payments were always part 4.
 
 **In scope**: the `[channels]` `OptionalService` subsystem; LDK node
 assembly + persistence + event loop; the open-by-upgrade admission path (the
@@ -75,12 +81,13 @@ true when enabled.
 - **The Ark channel type / HTLC-success-CSV asymmetry** — stage 2 (the LDK
   fork). Stage-1 captaind negotiates a **stock** channel type
   (`anchors_zero_fee_commitments`) and refuses any other; it does NOT gate on
-  an `ark_channel` feature bit (there is none). The success-CSV is the
-  structural defense that lets a party which *cannot force-close early* — the
-  server, by WD-16 — still win an on-chain HTLC-success race. Without it, safe
-  server HTLC-holding needs directional policy + caps or the fork itself; this
-  is precisely why **all** HTLC handling (not just forwarding) is deferred
-  (§3), and it may genuinely require the stage-2 fork rather than policy alone.
+  an `ark_channel` feature bit (there is none). The exact role of the success
+  CSV in the on-chain HTLC race is stage-2 material and not restated here (the
+  note deliberately does not assert its mechanism); the load-bearing fact for
+  MR-3 is only that **safe server HTLC handling is not available on stock LDK**
+  without either that fork-provided binding or directional operator policy +
+  caps — which is why **all** HTLC handling is deferred to part 4 / stage 2
+  (§3), and may genuinely require the fork rather than policy alone.
 
 **The reference implementation is mined, not ported.** The old branch
 (`ark-channels-bridge-2026-06-18`, server side in `server/src/ldk/*` +
@@ -145,10 +152,15 @@ Per MR-0's proven shape on stock `lightning` 0.2.4:
   long-term `S`. The spec is explicit (PV-4, BR-14): the BOLT-3 funding keys
   are ordinary Lightning keys, distinct from the cooperative `A`/`S`. (The
   old branch appeared to override the funding key to `S`, but that override
-  was dead at branch tip — its signer discarded it.) The server persists the
-  canonical `funding_redeem_script` and funding output that LDK supplies on
-  the `ChannelPending` event, and admission compares the bridge's out0
-  against *that* (§6, check 12) rather than reconstructing keys.
+  was dead at branch tip — its signer discarded it.) **The canonical funding
+  `TxOut` is assembled from two LDK events, since neither alone carries it**
+  (review F5): `OpenChannelRequest` supplies `funding_satoshis` (+ the
+  temporary channel id, counterparty, and proposed type — persisted at
+  acceptance, before the accept call), and `ChannelPending` supplies the
+  funding *outpoint* and the final channel type/`funding_redeem_script`. The
+  server derives `funding_txout = (funding_satoshis, P2WSH(funding_redeem_
+  script))` and admission compares the bridge's out0 against *that* (§6, check
+  12) — it never reconstructs the funding keys itself.
 - **Persistence**: a direct `chain::chainmonitor::Persist` impl over postgres
   for **monitors** (NOT a KVStore shim), calls routed through a **dedicated
   runtime + bb8 pool** (`db_executor.rs`) — load-bearing: LDK's synchronous
@@ -196,45 +208,70 @@ Neither half trusts the other. Both sides pass `ChannelAuthorization::
 UpgradeOutput` into the MR-1 builder — the client when it *builds* the
 transfer, captaind when it re-derives from the cosign request.
 
-**The load-bearing invariant: the server never unrolls (WD-16).** *"The server
-never unrolls a tree on its own initiative; its only self-initiated on-chain
-act is the post-expiry sweep"* (matrix WD-16 → spec:1605-1614, user-stories:
-149-152). Structurally the server *cannot* unroll even if it wanted to: the
-bridge is a one-shot MuSig2 keyspend and the server only ever holds a partial;
-the client aggregates and keeps the completed bridge (spec ordering step 6).
-So the server's on-chain recourses are exactly two, **neither an unroll**:
-1. its **ChannelMonitor claims from the counterparty's own force-close** — if
-   the client goes on-chain, the *client* unrolls (it has the bridge) and the
-   server's monitor claims its output from the landed commitment;
+**The load-bearing profile choice: captaind never initiates a bridge unroll.**
+The spec permits a server to retain the completed bridge and force-close
+through it (BR-12/13 — a **MAY**, spec ~283/close region); the matrix's WD-16
+records that a *conforming server need not*, and MR-3 adopts the
+**no-retention profile**: captaind never broadcasts a bridge or otherwise goes
+*below* the channel VTXO output on its own initiative. This is a profile
+decision, not an absolute law — but under the chosen open cosign exchange it is
+also structurally enforced for the bridge specifically: the bridge is a
+one-shot MuSig2 keyspend and captaind holds only a *partial*; the client
+aggregates and keeps the completed bridge (spec ordering step 6, spec:410), so
+captaind *cannot* broadcast it. captaind's on-chain acts are therefore all **at
+or above the channel VTXO output**, never a bridge unroll:
+1. **ChannelMonitor claims from the counterparty's own force-close** — if the
+   client goes on-chain, the *client* unrolls (it has the bridge) and captaind's
+   monitor claims its output from the landed commitment;
 2. the **whole-output expiry sweep** via the `timelock-sign(expiry, S)` leaf on
-   the channel VTXO output (above the bridge) — the ultimate backstop.
+   the channel VTXO output — the backstop;
+3. the **parent-exit response** (§7) — reactively actualizing the retained
+   *transfer* transactions up to the channel VTXO output. (This is above the
+   channel VTXO output, so it is not a bridge unroll — it is why the invariant
+   is stated as "never *initiates a bridge* unroll," not "never broadcasts.")
 
-**Why this means MR-3 holds no live HTLCs.** The standard-Lightning defense for
-a party that holds a preimage and must beat a counterparty's timeout is to
-force-close *early* and claim with margin. The server cannot do that (WD-16:
-it can't unroll). So for any HTLC where the server is the preimage-holder that
-must claim before a client-controlled timeout — i.e. every *receive* and every
-*forward* — a client can stall to the HTLC's CLTV, then force-close and race
-its timeout against the server's success on the just-landed commitment. In
-stage 1 there is **no success-CSV** to give the server a structural window, and
-a bigger CLTV floor does not help: it only moves the deadline the attacker
-waits for. The server is exposed for the HTLC principal in that direction, and
-the fix is not server machinery (that would violate WD-16) but either the
-**stage-2 success-CSV** (the real structural defense for a party that can't act
-early), **directional operator policy** (never put the server in the
-must-claim-before-client-timeout position — "ban/scope client receives"), or
-**bounded griefing caps** (accept a small capped loss). All three are the
-**part-4 / stage-2** HTLC-safety layer. Therefore MR-3 ships **no production
-HTLC send or receive**; captaind's LDK node never originates or claims a
-payment in production. The channel opens, is defended, expires, and exits —
-economically inert until the safety layer lands. This is not a narrowing of
-the plan; payments were always part 4.
+**Why this means MR-3 originates and claims no HTLCs.** Because captaind never
+initiates a bridge unroll, it can never force-close *early* to win a
+preimage-vs-timeout race — the standard-Lightning defense for a party that
+holds a preimage and must beat a counterparty's timeout. So captaind must
+never be the party holding a preimage under deadline: it **never claims an
+inbound HTLC and never originates one.** Making the CLTV floor bigger does not
+help — it only moves the deadline a staller waits for. Safe server HTLC
+participation is deferred wholesale to **part 4 / stage 2**, whose tools are the
+stage-2 success-CSV and/or directional operator policy + bounded caps — **not**
+server unroll machinery (which the no-retention profile declines). MR-3
+therefore enforces, on stock LDK:
+- **no origination**: expose no send or invoice-generation API; never call
+  `send_payment`/`create_inbound_payment`;
+- **no claim**: never call `claim_funds`; on **every** `PaymentClaimable`
+  (including replay), immediately `fail_htlc_backwards` — captaind never reveals
+  a preimage, so it is never in the race;
+- **no server balance at open**: require `push_msat == 0` and reject
+  dual-funded (v2) opens, so the "server balance is zero" premise (spec:484)
+  holds and nothing moves at open;
+- forwarding stays off (`accept_forwards_to_priv_channels = false`).
 
-MR-3 *may* still exercise a **cooperative** HTLC round-trip in the test harness
-(§6a) — a purely off-chain settle that touches no commitment, second stage, or
-race — to prove the gate yields an operational channel. That is a mechanical
-operability check, explicitly **not** a shipped capability and **not** a safety
-claim.
+The honest guarantee is **"captaind originates and claims no production
+payments"** — *not* "no HTLC is ever momentarily committed": stock LDK commits
+an inbound final-hop HTLC before exposing it, and always advertises keysend, so
+an inbound HTLC can exist for the interval before captaind fails it back.
+Absolute pre-commit rejection would need an LDK hook (a fork), which stage 1
+does not have; failing every claimable back is the enforceable stock-LDK
+equivalent and is sufficient, because captaind's exposure only ever arises from
+*claiming*. The channel opens, is defended, expires, and exits — economically
+inert. This is not a narrowing of the plan; payments were always part 4.
+
+The MR-3 operability proof is that a released channel reflects usable
+capacity (`ChannelReady` exchanged, `next_outbound_htlc_limit_msat` non-zero,
+the peer sees it operational). A cooperative HTLC round-trip **may** also run
+in the test harness — but stated precisely: a cooperative settle *does* update
+and sign new commitments and HTLC second-stage transactions; "clean" means
+none is **broadcast** and no CSV path executes, and the test must wait through
+the final `revoke_and_ack` (the harness warns the final revoke can lag
+`PaymentClaimed`). It is a mechanical operability check on a controlled
+cooperative counterparty — explicitly **not** a shipped capability and **not**
+a safety claim (and it necessarily drives the very `claim_funds`/`send` paths
+production disables, so it is a test-only seam).
 
 ## 4. Open by upgrade — the flow captaind participates in
 
@@ -298,16 +335,34 @@ already being clawed back. The gate MUST be linearized:
   nothing (RG-4); a byte-identical re-upload is idempotent (RG-4); the set
   survives a crash (RG-5).
 - The synthetic confirmation is fed **only after that transaction commits**,
-  through an **idempotent outbox/reconciler**: the commit enqueues "release
-  channel_id"; a reconciler feeds the node and is safe to replay. A crash
-  between commit and feed is recovered at startup — the outbox still has the
-  entry — so the channel is never stranded registered-but-unfed. Startup
-  first catches the node up to the *real* chain, then drains the outbox.
+  and delivery is **level-triggered, not a one-shot outbox**: the release is a
+  durable *state* on the `channel_state` row (registered + a
+  `confirmation_fed` marker), and a reconciler re-derives "which registered
+  rows are not yet reflected as fed in a durable manager snapshot" and feeds
+  them idempotently. This closes the round-2 gap that a bare outbox missed:
+  `process_events_async` persists the `ChannelManager` **asynchronously**, so
+  feed-succeeded ≠ manager-durably-updated. `confirmation_fed` is set only
+  after a manager-persistence barrier confirms the fed state is on disk; until
+  then the reconciler re-feeds (idempotent). A crash at any point leaves the
+  DB state authoritative and the reconciler converges — the channel is never
+  stranded registered-but-operating-with-an-unfed-manager.
+- **Reorg / chain-generation gate.** The release reconciler and the
+  `on_reorg` handler are serialized on a single chain-generation guard, and
+  the reconciler **revalidates the anchor against the current best chain
+  immediately before feeding**: LDK forbids `transactions_confirmed` for a
+  header not in the best chain as of `best_block_updated`
+  (`chain/mod.rs:161`), so a registration committed just before its anchor is
+  reorged out must **not** feed the now-stale anchor — the reorg invalidates
+  the pending feed instead, and the release waits for a re-established anchor
+  (or fails closed if none returns, OP-22). Startup catches the node up to the
+  *real* chain first, then runs the reconciler.
 - **Late-registration refusal (spec:489-494)**: a registration arriving after
   the input's exit-chain final tx has confirmed — or after a confirmed
   ancestor expiry sweep forecloses the input — MUST be refused, not completed.
   Both are recorded as the watch's terminal resolution (§7); the linearized
-  check above reads that record under the same lock.
+  check above reads that record under the same lock. The admission at open
+  also **rejects `push_msat ≠ 0` and dual-funded (v2) opens** (§3), so no value
+  can move server-ward at open.
 
 **The server feeds its own node the synthetic confirmation** (the release).
 The old branch's server never did (its interceptor released readiness, and
@@ -328,11 +383,15 @@ release-contract reorg test). The note records this as the accepted disposition
 
 **SCID synthesis (I-10, spec:146-168; review F6).** A virtual funding has no
 block position; the node synthesizes one: the anchor's real height, a
-24-bit `tx_index` derived from the **bridge txid** (avoiding the coinbase
-slot, `≥ 1`), and the funding vout. Requirements the design must satisfy:
+`tx_index` derived from the **bridge txid**, and the funding vout (fixed at 0).
+The `tx_index` MUST be allocated from the band **`2500..2²⁴`** — LDK's own SCID
+*aliases* occupy `0..2499` (`util/scid_utils.rs`), so keeping synthetic indices
+above that band is what prevents a *future* LDK-generated alias from colliding
+with an earlier synthetic SCID (the round-2/round-3 hole). Requirements:
 - **Persist `{anchor_hash, height, tx_index, collision_bump}` transactionally
-  *before* feeding**, with a **unique full-SCID constraint** in the schema
-  (§10) and checked wrapping arithmetic on the bump.
+  *before* feeding**, with a **`UNIQUE(height, tx_index)`** constraint in the
+  schema (§10; vout is fixed 0) and checked wrapping arithmetic on the bump
+  within the `2500..2²⁴` band.
 - The synthesized SCID MUST be checked for collision against **every** local
   real SCID *and* alias — LDK inserts both into one map and panics on either
   collision (`ln/channelmanager.rs` SCID insert). Assert collision-fatality
@@ -447,13 +506,23 @@ commit `0595bb594` fixed exactly this). The subsystem tracks a durable state
 machine keyed by channel:
 
 ```
-opening(temp_channel_id)                     -- inbound accepted, pre-funding
+opening(temp_channel_id, counterparty, funding_satoshis, proposed_type)
+                                             -- OpenChannelRequest: persisted
+                                             --   BEFORE accept; push_msat==0 and
+                                             --   non-dual-funded REQUIRED (§3)
   → awaiting_upgrade(channel_id, funding_txo, funding_redeem_script, final_type)
-                                             -- ChannelPending seen; no Ark state yet — VALID
+                                             -- ChannelPending: outpoint+script; no
+                                             --   Ark backing yet — VALID
   → cosigned(backing_vtxo, watch_unarmed)    -- admission passed, bridge cosigned
   → registered(released)                     -- gate released (§5)
+  → terminal                                 -- expiry/ancestor-sweep (§8)
 ```
 
+- **`push_msat == 0` and non-dual-funded are checked at `OpenChannelRequest`,
+  before `accept_inbound_channel`** (§3) — else value could move server-ward at
+  open and the zero-server-balance premise (spec:484) breaks. The
+  `funding_satoshis` and counterparty are persisted here (F5: `ChannelPending`
+  does not carry them).
 - **No Ark state at `awaiting_upgrade` is valid**, not a violation. Only
   *partial or contradictory* state (e.g. a `ChannelPending` whose declared
   type/outpoint disagrees with a persisted record) is fatal → force-close.
@@ -473,14 +542,21 @@ opening(temp_channel_id)                     -- inbound accepted, pre-funding
 ## 7. The parent-exit watch (WD-2..5)
 
 An upgrade leaves the input VTXO's `delayed-sign(exit_delta, A)` leaf alive in
-the old chain, so a user could exit the input and claw back capacity now
-backing the channel — including balance the server has since earned. The
-defense (spec:470-506): the registered checkpoint/arkoor transactions spend
-the input at `nSequence = 0`, mineable the next block — `exit_delta − 1` ahead
-of the leaf's claim. captaind must **retain** the new level(s)' signed
-transactions and **watch** for any prefix of the input's exit chain
-confirming, and on seeing it **broadcast** the retained transaction(s),
-P2A-CPFP-bumped, ahead of the input's `exit_delta` window.
+the old chain, so a malicious user could **unroll the input's own exit chain**
+— actualizing the input VTXO output on-chain — and, `exit_delta` blocks later,
+sweep that output directly, clawing back capacity now backing the channel
+(including balance the server has since earned). The defense is a **forfeit**
+(spec:470-506, the forfeit-watch pattern of ARK #4/#7 applied to an open): the
+registered checkpoint/arkoor *transfer* transaction spends the input output by
+key path at `nSequence = 0`, mineable the next block — `exit_delta − 1` ahead
+of the input leaf's claim. So the trigger is precisely "the client has unrolled
+the input to its VTXO output": captaind **retains** the transfer transaction(s)
+and **watches** for any prefix of the input's exit chain confirming, and on
+seeing it **broadcasts the retained forfeit/transfer tx**, P2A-CPFP-bumped,
+landing the channel VTXO output (or its checkpoint parent) ahead of the input's
+`exit_delta` window. This response is entirely **at or above the channel VTXO
+output** — it never touches the bridge, which is why it is not a bridge unroll
+(§3, WD-16).
 
 Mechanism, mined from the old `ForfeitWatcher` parent-watch, pared to the
 upgrade kind and sharpened per review F7:
@@ -489,6 +565,14 @@ upgrade kind and sharpened per review F7:
   cosign but **armed only at registration**, in the same linearized
   transaction as the gate release (§5) — a cosigned-but-unregistered upgrade
   never operated, so an unarmed watch needs no response.
+- **Reconcile at insertion and arming (review F7).** A prefix of the input's
+  exit chain — or the final exit, or an ancestor sweep — may have **already
+  confirmed** before the row is written or armed; the listener only sees
+  *future* blocks. So both writing and arming the row MUST, under the same
+  channel-state lock, reconcile against the authoritative TxIndex / current
+  chain and immediately resolve-or-respond to anything already seen (an
+  already-confirmed final exit at arming time is a late-registration refusal,
+  §5; an already-confirmed prefix on an arming row fires the response at once).
 - **Resolution predicates (precise).** An **unarmed** watch does **not**
   resolve on a mere prefix of the input's exit chain confirming; it resolves —
   and makes any later registration terminal (a late-registration refusal, §5)
@@ -521,18 +605,34 @@ commitment are untouched (WD-4).
   the MR-1 forced-match already routes a `channel-funding` VTXO to
   `decide_action_expiry`; this MR makes that arm live for tracked VTXOs. It is
   the server's *only* self-initiated on-chain act (WD-16).
+- **The LDK terminal transition (review, new).** When an expiry sweep — or an
+  ancestor sweep that forecloses the funding — makes the virtual funding
+  permanently impossible, the LDK node still believes the channel is live and
+  0.2.4 has **no public "abandon without broadcast" API**. So the subsystem
+  must drive a durable **Ark-terminal transition**: mark the `channel_state`
+  row terminal, force-close the channel in LDK (a *logical* force-close of
+  LDK's own view — **not** an Ark bridge unroll), and **capture-and-suppress**
+  the resulting commitment/HTLC broadcasts in the capture broadcaster (they
+  spend an off-chain-only funding output and can never relay — the same
+  suppression the cooperative-close path already uses, §11.4), persist the
+  manager, and release the channel's watches and fee-bump reserve. Covered by
+  an expiry-then-restart test (the terminal state survives and is not re-driven).
 - **Config-decrease guard (I-9)**: the server MUST refuse a `max_vtxo_exit_depth`
   config decrease that would strand a live channel past downgrade eligibility
   (or require closure first), and MUST enforce `max_vtxo_exit_depth ≥ 2`.
   Checked at config-load and across restart. This is the one DA-8..10 piece
   this MR owns; the downgrade eligibility check is part 5.
-- **D2 (no server-side force-close scheduler) — a PERMANENT invariant, not an
-  MR-3 convenience.** The server never force-closes/unrolls (WD-16, §3);
-  structurally it can't (it holds only a bridge partial). Its recourses are the
-  monitor-claim from the counterparty's own force-close and the expiry sweep.
-  No server-side force-close/unroll scheduler is built in MR-3, part 4, or ever
-  — the earlier "part-4 I-6d scheduler" framing was a mis-derivation from a
-  review finding that measured against standard Lightning; the Ark design
+- **D2 (no server-side *bridge*-unroll force-close scheduler) — a PERMANENT
+  profile invariant.** captaind never initiates a bridge unroll (§3): under the
+  chosen cosign exchange it holds only a bridge *partial* and cannot broadcast
+  the bridge, and MR-3 adopts the no-retention profile (declining the spec's
+  BR-12/13 retention MAY). Its recourses are the monitor-claim from the
+  counterparty's force-close and the expiry sweep; the *LDK-internal* force-close
+  of the terminal transition (above) is a logical close that broadcasts nothing.
+  No server-side force-close-*through-the-bridge* scheduler is built in MR-3,
+  part 4, or ever — the earlier "part-4 I-6d scheduler" framing was a
+  mis-derivation from a review finding that measured against standard Lightning;
+  the Ark design
   rejects server unroll outright.
 - **D3 (the server never retains/actualizes the bridge) — also PERMANENT.**
   Only the *client* holds the completed bridge and unrolls; the server's expiry
@@ -557,9 +657,13 @@ commitment are untouched (WD-4).
   as expected — **less than the Ark-channel variant's `100 + 288 + ~18 ≈ 406`**
   by one `pinned_exit_delta`. There is **no** pending-HTLC second-stage term in
   stage-1 `F` (no success CSV, and no server HTLC-claim on-chain — WD-16);
-  that term is exactly what the stage-2 variant adds. Fix the concrete integer
-  (proposed `cltv_claim_slack = 18`) at code-start against the actual
-  offboard/forfeit margin constants; checked arithmetic + u16 guard.
+  that term is exactly what the stage-2 variant adds. **Resolved:
+  `cltv_claim_slack = 18`** (codex round-3 grounded this in BIP-431 / Core v29
+  TRUC policy / `submitpackage` — a level needs one confirmation, not deeper
+  burial — and LDK's `MAX_BLOCKS_FOR_CONF`; it is an operational next-block-CPFP
+  margin, not a consensus guarantee under unbounded congestion). Checked
+  arithmetic + u16 guard; confirm the constant against the offboard/forfeit
+  margin at code-start.
 
 ## 9. Config surface
 
@@ -569,8 +673,11 @@ commitment are untouched (WD-4).
 [channels]
 enabled = false
 listen_address = "0.0.0.0:9735"
-# runway-floor slack (D5); the exact default is set at code-start
-cltv_claim_slack = <TBD, §8>
+# exit-possibility floor slack (§8): small next-block-CPFP margin
+cltv_claim_slack = 18
+# fee-bump reserve for the parent-exit response + expiry sweep (§11.9)
+fee_bump_reserve_sat = <sized at code-start, §11.9>
+fee_bump_max_feerate_sat_vb = <sized at code-start, §11.9>
 ```
 
 No forwarding knobs (forwarding is part 4). Channel-type negotiation, the
@@ -592,8 +699,8 @@ against the rebased tree). Teleport tables (old V31/V32/V33/V36
 |---|---|---|
 | `ldk_channel_monitors` | LDK monitor blobs | V30 |
 | `ldk_channel_manager` | singleton manager blob (via the `KVStore` adapter) | V30 |
-| `channel_state(channel_id PK, funding_redeem_script, funding_txo, pinned_exit_delta, pinned_max_vtxo_exit_depth NOT NULL, final_channel_type, backing_vtxo, open_state, backing_registered_at)` | per-channel Ark state, the open state machine (§6b), the gate marker; funding keys are LDK-derived so the canonical redeem script/outpoint are persisted (§2c) | V30+V34+V36+V38, merged; `funding_redeem_script`/`open_state` new |
-| `channel_scid(channel_id PK, anchor_hash, height, tx_index, collision_bump, UNIQUE(height, tx_index, vout))` | synthetic SCID allocation, persisted before feeding, unique full-SCID (§5) | new (fixes the reference's hardcoded index) |
+| `channel_state(channel_id PK, temporary_channel_id, counterparty, funding_satoshis, funding_redeem_script, funding_txo, final_channel_type, pinned_exit_delta, pinned_max_vtxo_exit_depth NOT NULL, backing_vtxo, open_state, backing_registered_at, confirmation_fed, terminal_at)` | per-channel Ark state, the open state machine (§6b), the gate marker + `confirmation_fed` durability flag (§5), the terminal transition (§8); `funding_satoshis` from `OpenChannelRequest` + `funding_redeem_script` from `ChannelPending` derive the canonical funding `TxOut` (§2c, F5) | V30+V34+V36+V38, merged; `funding_satoshis`/`funding_redeem_script`/`open_state`/`confirmation_fed`/`terminal_at` new |
+| `channel_scid(channel_id PK, anchor_hash, height, tx_index, collision_bump, UNIQUE(height, tx_index))` | synthetic SCID allocation from the `2500..2²⁴` band, persisted before feeding; vout is fixed 0 so `(height, tx_index)` is the full-SCID key (§5) | new (fixes the reference's hardcoded index) |
 | `channel_parent_watch(input_vtxo_id PK, channel_id, kind CHECK('upgrade'), response_txids TEXT[], armed_at, resolution_reason, spending_txid, block_hash, block_height, resolved_at)` | parent-exit watch (§7); `armed_at` = armed, rich resolution for reorg unwind | V39/V40 (upgrade kind only; part 5 adds 'downgrade') |
 
 `pinned_*` land NOT NULL from birth (fresh table, no backfill migration).
@@ -618,7 +725,7 @@ excluded with teleport):
    from the event.
 5. **Fail-fast on monitor/manager deser** — panic rather than continue with a
    fresh manager that drops justice monitors.
-6. **SweepWalletSource trusts own unconfirmed change** — so HTLC bump
+6. **SweepWalletSource trusts own unconfirmed change** — so P2A-CPFP
    fee-funding is not starved by a lagging BDK view.
 7. **SCID non-collision derivation applied server-side** (§5) — the old
    server's `feed_tx_confirmation` hardcoded `tx_index = 0`; derive from the
@@ -628,10 +735,20 @@ excluded with teleport):
    anchors, empty feature sets. (The `ark_channel` bit + its CSV are stage 2.)
 
 Added by the review (F8):
-9. **Fee-bump reserve admission** — a documented fee-bump reserve policy
-   checked *before* `accept_inbound_channel`, so the node can always fund a
-   `BumpTransactionEvent` CPFP; and the **Core v29+/TRUC** relay requirement is
-   stated (the P2A/zero-fee package path needs it).
+9. **Fee-bump reserve — quantified, and scoped to what MR-3 actually
+   broadcasts.** MR-3 has **no HTLC-resolution** bumps (no HTLCs); the only
+   server liabilities that need CPFP fee-funding are the **parent-exit
+   response package(s)** (§7) and the **expiry sweep** (§8). The reserve policy
+   admits an open only if the confirmed-wallet-UTXO reserve still covers, at a
+   defined **maximum admitted feerate** and package weight, one worst-case
+   parent-exit response plus one expiry sweep per live channel: reserve
+   confirmed UTXOs per live channel at `accept_inbound_channel`, key them by the
+   broadcast's `claim_id` so **rebumps of the same package reuse the same
+   reserved UTXOs** (never double-spend the reserve), and **release** the
+   reservation only after the package confirms or the channel reaches its
+   terminal transition (§8). The **Core v29+/TRUC** relay requirement is stated
+   (the P2A/zero-fee package path needs it). Concrete reserve-sat and
+   max-feerate numbers are sized at code-start from the package weights.
 10. **Foreign-input-safe bump PSBT signing** (reference `6edd047f7`) — a mixed
     bump PSBT signs only wallet-owned inputs, leaving the LDK channel input for
     the channel signer.
@@ -717,30 +834,33 @@ downgrade and minus anything asserting adversarial HTLC safety (part 4).
 - **D1 (event driver)** — RESOLVED: async `lightning-background-processor`
   0.2.3 `process_events_async` + a small postgres `KVStore` for the singleton
   manager; custom monitor `Persist` retained (§2c).
-- **D2 (no server force-close scheduler)** — PERMANENT invariant: the server
-  never unrolls (WD-16); recourses are monitor-claim + expiry sweep (§3, §8).
-  No such scheduler is ever built.
-- **D3 (server never retains/actualizes the bridge)** — PERMANENT invariant
-  (§8). The client holds the completed bridge and is the only party that
-  unrolls; the server keeps the close outcome, not the bridge.
-- **HTLCs / payments** — NOT in MR-3. The server can't defend a preimage-claim
-  on-chain without unrolling (WD-16), so no production HTLC send/receive ships;
-  the HTLC-safety layer (stage-2 success-CSV and/or directional policy + caps —
-  **not** server unroll machinery) is part 4 / stage 2 (§3). captaind ships
-  `accept_forwards_to_priv_channels = false` and does not enable payments.
+- **D2 (no bridge-unroll force-close scheduler)** — PERMANENT profile invariant:
+  captaind never initiates a bridge unroll (WD-16 no-retention profile + holds
+  only a bridge partial); recourses are monitor-claim + expiry sweep + the
+  reactive parent-exit response (all at/above the channel VTXO output), plus the
+  broadcast-nothing LDK-internal terminal close (§3, §8). No such scheduler is
+  ever built.
+- **D3 (server keeps the close outcome, not the bridge)** — PERMANENT profile
+  invariant (§8): MR-3 declines the spec's BR-12/13 retention MAY; only the
+  *client* holds the completed bridge and unrolls.
+- **HTLCs / payments** — NOT in MR-3. captaind originates and claims none (no
+  send/invoice API, never `claim_funds`, `fail_htlc_backwards` on every
+  claimable, `push_msat==0`, no dual-fund, no forwarding); the HTLC-safety layer
+  (stage-2 success-CSV and/or directional policy + caps — **not** server unroll
+  machinery) is part 4 / stage 2 (§3).
 - **Funding keys** — RESOLVED: LDK-derived per-channel, not `S` (§2c, BR-14).
 - **Watcher availability** — RESOLVED: always-on embedded watcher; not gated on
   the optional `watchman` service (§2a/§7).
 - **SCID privacy** — RESOLVED: `negotiate_scid_privacy = true` (the client/funder
   must set it), synthetic index in the `2500..2²⁴` band (LDK aliases use
   `0..2499`), persisted allocation, collision-fatal vs real + alias SCIDs (§5).
-- **D5 (`cltv_claim_slack` / size of F)** — RESOLVED to a **small fixed margin**
-  (proposed `18`), giving `F ≈ 262` at the defaults — *less* than the
-  Ark-channel variant's `≈406` by one `pinned_exit_delta`, since stage-1 carries
-  no success-CSV term. codex's serial `≈1757` is rejected: it buried each
-  genesis level to `C` confirmations; the chain confirms one level per block
-  (§8). Pin the exact integer to the offboard/forfeit margin constant at
-  code-start.
+- **D5 (`cltv_claim_slack` / size of F)** — RESOLVED: **`cltv_claim_slack = 18`**
+  (codex r3 grounded it in BIP-431 / Core v29 TRUC / `submitpackage` — one
+  confirmation per level, not deeper burial — and LDK `MAX_BLOCKS_FOR_CONF`),
+  giving `F ≈ 262` at the defaults — *less* than the Ark-channel variant's
+  `≈406` by one `pinned_exit_delta`, since stage-1 carries no success-CSV term.
+  codex's earlier serial `≈1757` is rejected. Confirm the constant against the
+  offboard/forfeit margin at code-start.
 - **Boundary** — the plan's §7 owner table predates the MR-1 shape-bounding
   fold and this HTLC-scoping; this note treats OP-2's shape as done in MR-1 and
   all HTLC/forwarding (I-6) as part 4. Recorded so scope isn't re-litigated.
