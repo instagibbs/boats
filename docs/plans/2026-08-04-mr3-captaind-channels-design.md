@@ -480,12 +480,25 @@ floor. Checks 1–12 were validated against the spec by the review:
     (value + script) == the persisted canonical funding output/redeem script
     (§2c). Either failure ⇒ MUST NOT cosign any part.
 
-Then: the generic `cosign_oor_with_builder` (flux-lock, not-exited check,
-persist unsigned virtual txs, sign the transfer) → `server_cosign_bridge`
-(MR-1's one-shot MuSig2 partial over the bridge keyspend sighash) →
-transition the channel to `cosigned` (§6b). BR-17: fresh nonce per session;
-the byte-identical duplicate is re-signed with a fresh nonce (documented
-stage-1 conformance deviation, spec:2007-2010 — no store-and-replay).
+Then everything that persists commits in **one DB transaction** (flux-lock
+and not-exited check first, as on the generic endpoint), with the channel
+row locked (`SELECT … FOR UPDATE`) and the input rows re-read fresh and
+locked under it: the in-transaction state decision (awaiting → fresh;
+cosigned with the identical backing → idempotent retry; anything else
+refuses and rolls the whole exchange back untouched), the fresh-view
+spendability re-check (a ban or spend that landed during admission refuses
+here, before anything is marked), the spent-marking/unsigned-virtual-tx
+persist, the `cosigned` transition and the (unarmed) watch row (§6b). The
+row lock is what serializes admission against a concurrent close or reap of
+the same channel: whichever commits first wins, the other refuses with no
+Ark mutation — so the spent-marking can never outlive the channel row it
+was admitted against. Only after that commit: sign the transfer
+(`server_cosign`) and the bridge (`server_cosign_bridge` — MR-1's one-shot
+MuSig2 partial over the bridge keyspend sighash, against the
+**reconstructed** channel VTXO's user key, like every other admitted
+value). BR-17: fresh nonce per session; the byte-identical duplicate is
+re-signed with a fresh nonce (documented stage-1 conformance deviation,
+spec:2007-2010 — no store-and-replay).
 
 **Operability check — cooperative HTLC round-trip (test harness only).** Once a
 channel is registered and released, the harness may drive a **cooperative**
@@ -522,6 +535,10 @@ opening(temp_channel_id, counterparty, funding_satoshis, proposed_type)
   → cosigned(backing_vtxo, watch_unarmed)    -- admission passed, bridge cosigned
   → registered(released)                     -- gate released (§5)
   → terminal                                 -- expiry/ancestor-sweep (§8)
+
+opening | awaiting_upgrade → reaping         -- outstayed the pending bound: durably
+  → (row deleted on ChannelClosed)           --   marked FIRST, LDK side closed, row
+                                             --   deleted only when the close lands
 ```
 
 - **`push_msat == 0` and non-dual-funded are checked at `OpenChannelRequest`,
@@ -536,14 +553,40 @@ opening(temp_channel_id, counterparty, funding_satoshis, proposed_type)
   inconsistent Ark state) maps to **`ForceClose`, never `Replay`** (review /
   §11.3) — a `Replay` would let a peer poison the shared LDK event queue.
   Server-local `Persist` failures map to `Replay`.
+- **Crash-replay idempotence** (lightning 0.2.4 documents that a handled
+  event whose removal did not persist re-delivers): an exact replay of
+  `OpenChannelRequest` (an identical `opening` row already on record) and of
+  `ChannelPending` (the identical promotion already applied — in
+  `awaiting_upgrade` or ANY later state) is a no-op, not a contradiction;
+  only **mismatched ingredients** force-close.
 - **Pending-open resource control**: an `opening`/`awaiting_upgrade` channel
   consumes LDK + DB resources before any cosign, so the subsystem bounds
   concurrent pending opens per peer and times out/cleans up stale ones. (This
   is why admission refusals are "no *Ark* state mutation" — the LDK pending
   channel is real and is reaped by this machine, not by admission.)
-- The gate (§5 release) MUST land in or before the first commit that accepts
-  opens — decoding an open without the gate is the same unsafe intermediate
-  the MR-1 arc rejected.
+- **Reaping is mark-then-close**: the reaper durably marks stale pre-cosign
+  rows `reaping`, force-closes the LDK side, and the row is deleted only when
+  the close lands (`ChannelClosed`) — no accepted LDK channel ever exists
+  without its record. A close that does not land retries every block; a
+  channel LDK does not know (`ChannelUnavailable`) has its orphaned row
+  deleted directly. `reaping` rows still count against the peer's pending
+  bound, and admission's row lock serializes against the mark.
+- The gate (§5) splits into a **blocking half and a release half**, and the
+  blocking half MUST land in the same commit that accepts opens: the chain
+  feed withholds every COSIGNED channel's bridge txid from the node, so a
+  real bridge confirmation cannot walk an unregistered channel to
+  operational — and an unexpected `ChannelReady` fails closed (force-close).
+  **Only authenticated txids enter the filter**: admission inserts the
+  bridge txid its own reconstruction produced (before releasing the
+  partial), and boot seeds from `cosigned` rows only. The funding txid a
+  peer declares at `ChannelPending` is UNTRUSTED and must never be
+  filtered — a peer could name an arbitrary transaction (another channel's
+  commitment!) and blind the node's monitors to it. Pre-cosign, a decoy
+  confirmation at the declared outpoint is answered by the fail-closed
+  `ChannelReady`, not by filtering. The release half — feeding the
+  confirmation on committed registration — is stage 4; decoding an open
+  without the blocking half is the same unsafe intermediate the MR-1 arc
+  rejected.
 
 ## 7. The parent-exit watch (WD-2..5)
 
@@ -826,8 +869,10 @@ skills).
    `supports_channels` tracking enablement. Inert: accepts no opens yet.
 3. **Open-by-upgrade admission + the open state machine** — the §6 checks,
    the §6b durable state machine, `UpgradeOutput` into the builder, bridge
-   reconstruct + cosign + the two equalities, channel-state persist. Channel
-   opens but is not usable until the gate releases (stage 4).
+   reconstruct + cosign + the two equalities, channel-state persist, and the
+   gate's blocking half (the withheld-funding confirmation filter +
+   fail-closed `ChannelReady`). Channel opens but is not usable until the
+   gate's release half lands (stage 4).
 4. **The linearized gate + watch + expiry + guard** — confirmation-injection
    release via the level-triggered reconciler on committed registration, the SCID
    allocator, the parent-exit watch (arm/detect/respond/resolve incl. the
