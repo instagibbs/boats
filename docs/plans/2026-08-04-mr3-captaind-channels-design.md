@@ -339,15 +339,25 @@ already being clawed back. The gate MUST be linearized:
 - The synthetic confirmation is fed **only after that transaction commits**,
   and delivery is **level-triggered, not a one-shot outbox**: the release is a
   durable *state* on the `channel_state` row (registered + a
-  `confirmation_fed` marker), and a reconciler re-derives "which registered
-  rows are not yet reflected as fed in a durable manager snapshot" and feeds
-  them idempotently. This closes the round-2 gap that a bare outbox missed:
-  `process_events_async` persists the `ChannelManager` **asynchronously**, so
-  feed-succeeded ≠ manager-durably-updated. `confirmation_fed` is set only
-  after a manager-persistence barrier confirms the fed state is on disk; until
-  then the reconciler re-feeds (idempotent). A crash at any point leaves the
-  DB state authoritative and the reconciler converges — the channel is never
-  stranded registered-but-operating-with-an-unfed-manager.
+  `confirmation_fed` latch), and a reconciler re-derives the unfed rows and
+  feeds them idempotently. The original round-2 formulation gated the latch
+  on a manager-persistence barrier ("set only after the fed state is on
+  disk"); implementation found every such barrier unsound against the
+  driver's encode timing (`process_events_async` encodes before it calls the
+  store, so no write-side acknowledgement can prove the snapshot contains
+  the feed). The shipped design needs no ordering proof at all:
+  `confirmation_fed` is a **per-process latch**, and boot clears every latch
+  and re-feeds all registered channels against whatever manager snapshot
+  reloaded — safe because a re-feed of the same confirmation under the same
+  header is idempotent in LDK, and a moved anchor is withdrawn by the
+  catch-up's stale-confirmation pass before the reconciler runs. A crash at
+  any point leaves the DB state authoritative and the reconciler converges —
+  the channel is never stranded registered-but-operating-with-an-unfed-
+  manager. Registration itself commits only after a cursor handoff: the
+  transaction requires the block listener to have indexed the exact block
+  (height AND hash) the chain-side screens observed as tip, so every block
+  the screens could have missed has its facts recorded before the release
+  can commit.
 - **Reorg / chain-generation gate.** The release reconciler and the
   `on_reorg` handler are serialized on a single chain-generation guard, and
   the reconciler **revalidates the anchor against the current best chain
@@ -362,7 +372,18 @@ already being clawed back. The gate MUST be linearized:
   the input's exit-chain final tx has confirmed — or after a confirmed
   ancestor expiry sweep forecloses the input — MUST be refused, not completed.
   Both are recorded as the watch's terminal resolution (§7); the linearized
-  check above reads that record under the same lock. The admission at open
+  check reads that record under the same lock, and it is THE authority. The
+  chain-side screens (the final-exit look and the exit-chain viability walk)
+  run BEFORE the transaction — RPC walks must never hold database locks —
+  and anything they miss that confirms afterwards lands as a recorded fact
+  the in-transaction re-read refuses on; a final exit confirming inside the
+  residual cursor-lag window degrades to the ordinary armed-watch race the
+  response answers. This chain→fact→refusal ladder is sound only while the
+  listener sees every block a live channel could care about, hence the
+  CONVERSE of §2a's invariant: **captaind refuses to start with `[channels]`
+  disabled while any cosigned/registered/terminal row exists** — a disabled
+  subsystem would blind the monitors, the watch and the confirmation filter,
+  and the shared cursor would skip blocks the watch can never revisit. The admission at open
   also **rejects `push_msat ≠ 0` and dual-funded (v2) opens** (§3), so no value
   can move server-ward at open.
 
@@ -500,20 +521,22 @@ value). BR-17: fresh nonce per session; the byte-identical duplicate is
 re-signed with a fresh nonce (documented stage-1 conformance deviation,
 spec:2007-2010 — no store-and-replay).
 
-**Operability check — cooperative HTLC round-trip (test harness only).** Once a
-channel is registered and released, the harness may drive a **cooperative**
-bidirectional HTLC exchange with the test client, settled off-chain by
-preimage. A cooperative settle *does* update and sign new commitments and HTLC
-second-stage transactions; "cooperative/clean" means **none is broadcast and no
-on-chain/CSV path executes** (and the test waits through the final
-`revoke_and_ack`, which the harness notes can lag `PaymentClaimed`). This proves
-the gate yields an *operational* channel (HTLCs move), not merely an opened one.
-It is explicitly a **mechanical operability check, not a shipped capability and
-not a safety claim** (and it drives the very `claim_funds`/`send` paths
-production disables): production HTLC send/receive is not enabled in MR-3
+**Operability check — an HTLC probe (test harness only).** Once a channel is
+registered and released, the harness drives a one-hop HTLC probe from the
+test client: the HTLC crosses, commits on both sides, and — because
+production claims nothing, ever (`PaymentClaimable` is failed back on
+sight, and a random-hash probe fails even earlier inside stock LDK) — is
+failed back after the complete commitment dance, leaving the channel
+usable. This deliberately implements the check WITHOUT any test seam into
+the never-claim policy: the earlier "cooperative settle by preimage"
+formulation would have required driving `claim_funds`, which production
+disables; a full add→commit→fail→commit round-trip is equal evidence that
+the gate yields an *operational* channel (HTLC machinery moves), and it is
+explicitly a **mechanical operability check, not a shipped capability and
+not a safety claim**: production HTLC send/receive is not enabled in MR-3
 (§3 — the server cannot defend a preimage-claim on-chain without unrolling,
-which WD-16 forbids; that safety is the part-4/stage-2 layer). The adversarial
-force-close-with-pending-HTLC behavior belongs to part 4.
+which WD-16 forbids; that safety is the part-4/stage-2 layer). The
+adversarial force-close-with-pending-HTLC behavior belongs to part 4.
 
 ### 6b. The durable open state machine (review F4)
 
@@ -640,10 +663,19 @@ upgrade kind and sharpened per review F7:
   row per settled channel (`TODO(ark8)`); MR-3 implements the ancestor-sweep
   resolution so rows are collected, not leaked.
 
-Detect/respond/progress run in the `ChainEventListener`, sharing the
-offboard-forfeit watcher's TxIndex / nursery / wallet. The response
-actualizes only the channel-VTXO (or checkpoint parent) level; the bridge and
-commitment are untouched (WD-4).
+The RESPONSE rides the generic watchman: a spent input whose exit confirms
+has its registered spending transaction progressed on-chain, CPFP-bumped
+from the watchman wallet — nothing channel-specific, which is exactly why
+channels-enabled REQUIRES the embedded watchman (§2a, enforced at config
+validation) and why the watchman wallet must be funded (the response CPFP
+spends it). What is channel-specific is the BOOKKEEPING in the channels
+`ChainEventListener`: the durable resolution record with its evidence, the
+armed/unarmed predicates, the reorg reopen, and the foreclosure detection —
+a confirmed FOREIGN spend of a live channel VTXO's own outpoint (anything
+but the bridge, e.g. the expiry sweep) walks the row to `terminal`, as does
+a transitive `ancestor_swept` resolution. The response actualizes only the
+channel-VTXO (or checkpoint parent) level; the bridge and commitment are
+untouched (WD-4).
 
 ## 8. Expiry, the config guard, and the permanent no-unroll invariants
 
@@ -753,7 +785,7 @@ against the rebased tree). Teleport tables (old V31/V32/V33/V36
 |---|---|---|
 | `ldk_channel_monitors` | LDK monitor blobs | V30 |
 | `ldk_channel_manager` | singleton manager blob (via the `KVStore` adapter) | V30 |
-| `channel_state(channel_id PK, temporary_channel_id, counterparty, funding_satoshis, funding_redeem_script, funding_txo, final_channel_type, pinned_exit_delta, pinned_max_vtxo_exit_depth NOT NULL, backing_vtxo, open_state, backing_registered_at, confirmation_fed, terminal_at)` | per-channel Ark state, the open state machine (§6b), the gate marker + `confirmation_fed` durability flag (§5), the terminal transition (§8); `funding_satoshis` from `OpenChannelRequest` + `funding_redeem_script` from `ChannelPending` derive the canonical funding `TxOut` (§2c, F5) | V30+V34+V36+V38, merged; `funding_satoshis`/`funding_redeem_script`/`open_state`/`confirmation_fed`/`terminal_at` new |
+| `channel_state(channel_id PK, temporary_channel_id, counterparty, funding_satoshis, funding_redeem_script, funding_txo, final_channel_type, pinned_exit_delta, pinned_max_vtxo_exit_depth NOT NULL, backing_vtxo, open_state, backing_registered_at, confirmation_fed, terminal_at)` | per-channel Ark state, the open state machine (§6b), the gate marker + the `confirmation_fed` per-process latch (§5), the terminal transition (§8); `funding_satoshis` from `OpenChannelRequest` + `funding_redeem_script` from `ChannelPending` derive the canonical funding `TxOut` (§2c, F5) | V30+V34+V36+V38, merged; `funding_satoshis`/`funding_redeem_script`/`open_state`/`confirmation_fed`/`terminal_at` new |
 | `channel_scid(channel_id PK, anchor_hash, height, tx_index, collision_bump, UNIQUE(height, tx_index))` | synthetic SCID allocation from the `2500..2²⁴` band, persisted before feeding; vout is fixed 0 so `(height, tx_index)` is the full-SCID key (§5) | new (fixes the reference's hardcoded index) |
 | `channel_parent_watch(input_vtxo_id PK, channel_id, kind CHECK('upgrade'), response_txids TEXT[], armed_at, resolution_reason, spending_txid, block_hash, block_height, resolved_at)` | parent-exit watch (§7); `armed_at` = armed, rich resolution for reorg unwind | V39/V40 (upgrade kind only; part 5 adds 'downgrade') |
 
