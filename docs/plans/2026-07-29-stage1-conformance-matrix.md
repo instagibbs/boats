@@ -228,7 +228,7 @@ explicit channel path could otherwise sidestep the generic validators.
 - **WD-13 MUST** — Confirmed first, split unregistered: the settlement is the unilateral fallback already in progress, and the server MUST refuse the split's registration from then on (RG-12). — `08-channels.md:1519-1531`
 - **WD-14 fact** — This refusal is the downgrade's counterpart of the upgrade's late-registration refusal (RG-7). — `08-channels.md:1531-1534`
 - **WD-15 fact** — Neither side's crash creates a window for the other: safety-critical state is stated as observable properties that MUST survive a crash; a party that cannot recover fails **closed**. — `docs/channel-user-stories.md:182-186`; `08-channels.md:634,1473`
-- **WD-16 fact** — The server never unrolls a tree on its own initiative; its only self-initiated on-chain act is the post-expiry sweep. — `docs/channel-user-stories.md:149-152`; `08-channels.md:1605-1614`
+- **WD-16 fact** — The server never unrolls a tree on its own initiative; its self-initiated on-chain acts are the post-expiry sweep and — once the counterparty has actualized the funding on-chain — a standard BOLT force-close of that channel (expected for fund recovery whenever the server carries balance or unresolved HTLCs; a zero-balance server MAY leave the channel open, accepting the monitoring cost). Neither act puts a tree or bridge on-chain. *(Amended 2026-08-06: the post-actualization branch was unstated, and the old wording forbade the server's only recovery against a client who actualizes and then griefs by absence.)* — `docs/channel-user-stories.md` (the never-unroll and vanishing-user stories); `08-channels.md` "Server recourse after expiry" + "Server recourse after the bridge confirms"
 
 ### 7. Unilateral exit `[UE]`
 

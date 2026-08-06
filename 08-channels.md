@@ -287,7 +287,10 @@ stranded by an absent client is the expiry sweep of the channel VTXO output (see
 "Server recourse after expiry"), which needs neither the bridge nor the
 commitment. A server that does retain the bridge can force-close before expiry
 by broadcasting bridge + commitment (e.g. to reclaim liquidity from an idle
-channel early) — an optimization, not a requirement.
+channel early) — an optimization, not a requirement. And if the *client*
+actualizes the funding (exit + bridge) and only then goes absent, no retained
+bridge is needed at all: the server's recourse is a standard force-close of
+the now-ordinary channel ("Server recourse after the bridge confirms").
 
 ## Channel open
 
@@ -1042,6 +1045,24 @@ or commitment — just as it may sweep any unspent cosign-taproot output past ex
 VTXO output on-chain but left the channel otherwise unresolved (for example,
 exited the VTXO but never broadcast the bridge). It is bounded by `expiry_height`,
 which is why the user MUST close or exit before expiry.
+
+### Server recourse after the bridge confirms
+
+Once the user has broadcast the bridge, the sweep recourse is gone — the
+expiry leaf sat on the now-spent VTXO output ("The force-close deadline").
+From that point the channel is an ordinary on-chain-funded Lightning
+channel, and the server's recourse against an absent or uncooperative
+counterparty is the **standard BOLT force-close**: broadcast its own latest
+commitment and claim its outputs per BOLT-3. This is expected, not
+exceptional — a user can actualize the funding unilaterally at any time and
+then simply stop cooperating, and a server with balance or unresolved HTLCs
+in the channel MUST eventually force-close to recoup them. It does not
+weaken the no-unroll rule: the user actualized the funding, and the
+server's broadcast spends an output that already exists on-chain —
+it actualizes nothing. It needs no retained bridge either: the user's
+broadcast supplied it. A server with nothing in the channel MAY instead
+leave it open indefinitely, accepting the monitoring cost (the user may
+well still be using it — an actualized funding is not a closed channel).
 
 ### The force-close deadline
 
@@ -2000,6 +2021,15 @@ that stand in for the extensions' protections:
   forwarding `cltv_expiry_delta` at or above `F`. Forwarding is otherwise
   unrestricted (payments between two users of one service require it), and
   this exposure ends where the type extension is adopted.
+* **Actualized-then-abandoned channels.** A server that carries no channel
+  balance (a lifecycle-only deployment: `push_msat = 0`, payments not yet
+  enabled) MAY leave a client-actualized channel open indefinitely rather
+  than force-close it ("Server recourse after the bridge confirms") — there
+  is nothing to recoup, and the cost is the held monitor. The moment a
+  deployment carries balance or forwards HTLCs, that recourse is
+  load-bearing: the server MUST operate an idleness/deadline policy that
+  force-closes actualized channels it can no longer afford to leave open,
+  with fee funding for the commitment's CPFP.
 * **Known conformance deviations.** (i) The attestation's operation-identity
   binding of `channel_id` (ARK #5) is not enforced; a tampered `channel_id`
   is caught at partial-signature verification instead ("Messages"), and the

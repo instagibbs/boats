@@ -146,13 +146,17 @@ Stories apply to both user personas unless marked otherwise.
   force-close, claim per BOLT-3. The costs are stated up front: act before the
   deadline, and hold an on-chain fee reserve to bump the chain. ("Unilateral
   exit / force-close", "Trust assumptions")
-* ✅ As a server, **I never unroll a tree on my own.** Every unilateral
-  broadcast in the system is the user's; my only unilateral on-chain act is
-  the expiry sweep of an output already on-chain. ("Server recourse after
-  expiry")
+* ✅ As a server, **I never unroll a tree on my own.** Every tree and bridge
+  broadcast in the system is the user's; my unilateral on-chain acts are the
+  expiry sweep of an output already on-chain and — once a user has actualized
+  a funding on-chain themselves — a standard Lightning force-close of that
+  channel. ("Server recourse after expiry", "Server recourse after the bridge
+  confirms")
 * ✅ As a server, a user who vanishes forever costs me exactly: capital locked
-  until `expiry_height`, then one sweep transaction. Bounded, priced, and
-  known at admission.
+  until `expiry_height`, then one sweep transaction. A user who actualizes the
+  funding first and then vanishes costs me a standard force-close to recoup
+  whatever the channel owes me — and nothing at all until I have a reason to
+  close. Bounded, priced, and known at admission.
 * ✅ As a server, forfeited state cannot beat me to the chain: a forfeit
   spends ahead of the bridge's `exit_delta` with no timelock, and my
   forfeit-watch duty — surviving restarts — enforces it. ("Refresh", the
