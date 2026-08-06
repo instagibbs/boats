@@ -353,11 +353,16 @@ already being clawed back. The gate MUST be linearized:
   catch-up's stale-confirmation pass before the reconciler runs. A crash at
   any point leaves the DB state authoritative and the reconciler converges —
   the channel is never stranded registered-but-operating-with-an-unfed-
-  manager. Registration itself commits only after a cursor handoff: the
-  transaction requires the block listener to have indexed the exact block
-  (height AND hash) the chain-side screens observed as tip, so every block
-  the screens could have missed has its facts recorded before the release
-  can commit.
+  manager. Registration's safety rests on its chain-side screens (the
+  input's final-exit `tx_status` and the exit-chain viability walk, both
+  queried straight from bitcoind, so a lagging listener cannot hide a
+  foreclosure) plus a **scan-epoch guard**: the subsystem bumps a
+  `scan_epoch` at the end of every `on_block_added` AND `on_reorg` (under
+  `chain_lock`); registration and admission capture it before their first
+  screen and, under `chain_lock` at commit, require it unchanged — so no
+  block or reorg was applied between the screens and the watch-row insert.
+  (The DB cursor lags the listener's scan, so it is not the signal; the
+  epoch, bumped inside the scan, is.)
 - **Reorg / chain-generation gate.** The release reconciler and the
   `on_reorg` handler are serialized on a single chain-generation guard, and
   the reconciler **revalidates the anchor against the current best chain
@@ -697,7 +702,7 @@ untouched (WD-4).
   spend an off-chain-only funding output and can never relay — the same
   suppression the cooperative-close path already uses, §11.4; and the
   `BumpTransactionEvent`s the logical force-close emits are likewise suppressed),
-  persist the manager, and release the channel's watches and fee-bump reserve.
+  persist the manager, and release the channel's watches.
   Because `terminal_at` and the manager snapshot are separate durable writes,
   the terminal transition is **level-triggered like the release (§5)**: a
   reconciler re-drives the logical close until the restored manager no longer
@@ -761,9 +766,6 @@ enabled = false
 listen_address = "0.0.0.0:9735"
 # exit-possibility floor slack (§8): small next-block-CPFP margin
 cltv_claim_slack = 18
-# fee-bump reserve for the parent-exit response + expiry sweep (§11.9)
-fee_bump_reserve_sat = <sized at code-start, §11.9>
-fee_bump_max_feerate_sat_vb = <sized at code-start, §11.9>
 ```
 
 No forwarding knobs (forwarding is part 4). Channel-type negotiation, the
@@ -783,13 +785,16 @@ against the rebased tree). Teleport tables (old V31/V32/V33/V36
 
 | Table / column | Purpose | Old origin |
 |---|---|---|
-| `ldk_channel_monitors` | LDK monitor blobs | V30 |
+| `ldk_channel_monitor` | LDK monitor blobs | V30 |
 | `ldk_channel_manager` | singleton manager blob (via the `KVStore` adapter) | V30 |
-| `channel_state(channel_id PK, temporary_channel_id, counterparty, funding_satoshis, funding_redeem_script, funding_txo, final_channel_type, pinned_exit_delta, pinned_max_vtxo_exit_depth NOT NULL, backing_vtxo, open_state, backing_registered_at, confirmation_fed, terminal_at)` | per-channel Ark state, the open state machine (§6b), the gate marker + the `confirmation_fed` per-process latch (§5), the terminal transition (§8); `funding_satoshis` from `OpenChannelRequest` + `funding_redeem_script` from `ChannelPending` derive the canonical funding `TxOut` (§2c, F5) | V30+V34+V36+V38, merged; `funding_satoshis`/`funding_redeem_script`/`open_state`/`confirmation_fed`/`terminal_at` new |
+| `channel_state(channel_id PK, temporary_channel_id, counterparty, funding_satoshis, funding_redeem_script, funding_txo, final_channel_type, pinned_exit_delta, pinned_max_vtxo_exit_depth, backing_vtxo, open_state, backing_registered_at, confirmation_fed, terminal_at)` | per-channel Ark state, the open state machine (§6b), the gate marker + the `confirmation_fed` per-process latch (§5), the terminal transition (§8); `funding_satoshis` from `OpenChannelRequest` + `funding_redeem_script` from `ChannelPending` derive the canonical funding `TxOut` (§2c, F5) | V30+V34+V36+V38, merged; `funding_satoshis`/`funding_redeem_script`/`open_state`/`confirmation_fed`/`terminal_at` new |
 | `channel_scid(channel_id PK, anchor_hash, height, tx_index, collision_bump, UNIQUE(height, tx_index))` | synthetic SCID allocation from the `2500..2²⁴` band, persisted before feeding; vout is fixed 0 so `(height, tx_index)` is the full-SCID key (§5) | new (fixes the reference's hardcoded index) |
 | `channel_parent_watch(input_vtxo_id PK, channel_id, kind CHECK('upgrade'), response_txids TEXT[], armed_at, resolution_reason, spending_txid, block_hash, block_height, resolved_at)` | parent-exit watch (§7); `armed_at` = armed, rich resolution for reorg unwind | V39/V40 (upgrade kind only; part 5 adds 'downgrade') |
 
-`pinned_*` land NOT NULL from birth (fresh table, no backfill migration).
+`pinned_*` and `backing_vtxo` are **nullable until cosign** — a row is born
+at the open request with none of them, and a CHECK constraint enforces that
+they are all present once `open_state` reaches `cosigned` (the
+`channel_state_pins_present` CHECK). Fresh table, no backfill migration.
 `ldk_virtual_fundings` (old V30) is **not** carried unless commit-1 finds the
 `KeysManager` persistence needs it (review F11 says it does not). Schema
 regeneration: `just dump-server-sql-schema` → `server/schema.sql`.
@@ -821,25 +826,21 @@ excluded with teleport):
    anchors, empty feature sets. (The `ark_channel` bit + its CSV are stage 2.)
 
 Added by the review (F8):
-9. **Fee-bump reserve — quantified, and scoped to what MR-3 actually
-   broadcasts.** MR-3 has **no HTLC-resolution** bumps (no HTLCs); the only
-   server liabilities that need CPFP fee-funding are the **parent-exit
-   response package(s)** (§7) and the **expiry sweep** (§8). The reserve policy
-   admits an open only if the confirmed-wallet-UTXO reserve still covers, at a
-   defined **maximum admitted feerate** and package weight, one worst-case
-   parent-exit response plus one expiry sweep per live channel: reserve
-   confirmed UTXOs per live channel at `accept_inbound_channel`, key them by the
-   broadcast's `claim_id` so **rebumps of the same package reuse the same
-   reserved UTXOs** (never double-spend the reserve). The parent-exit and expiry
-   tranches release independently: the **expiry tranche is retained even after a
-   parent-exit response confirms** (a channel whose input was forfeited can
-   still reach expiry and need its sweep bumped), and each tranche releases only
-   after its own package confirms or the channel reaches its terminal transition
-   (§8). The **`BumpTransactionEvent`s emitted by the logical terminal
-   force-close are suppressed**, not funded from the reserve (§8 — those
-   broadcasts can never relay). The **Core v29+/TRUC** relay requirement is
-   stated. Concrete reserve-sat and max-feerate numbers are sized at code-start
-   from the package weights.
+9. **Fee-bumping rides the watchman; no dedicated reserve in stage 1.** MR-3
+   has **no HTLC-resolution** bumps (no HTLCs); the only server liabilities that
+   need CPFP fee-funding are the **parent-exit response** (§7) and the **expiry
+   sweep** (§8), and both run through the embedded watchman's existing
+   wallet-CPFP path — the same on-demand confirmed-UTXO selection every other
+   watchman sweep uses (offboard forfeits, arkoor exits). A dedicated
+   always-funded per-channel reserve was designed but **not built**: in stage 1
+   a channel holds **zero server balance** (`push_msat == 0`, no payments), so
+   the parent-exit response and expiry sweep protect no server funds, and the
+   watchman's best-effort CPFP within the `exit_delta` window is sufficient. The
+   reserve earns its keep in **part 4**, where payments give the server balance
+   to protect; it is built there, not speculatively here. The
+   **`BumpTransactionEvent`s emitted by the logical terminal force-close are
+   suppressed** (§8 — those broadcasts can never relay). The **Core v29+/TRUC**
+   relay requirement stands.
 10. **Foreign-input-safe bump PSBT signing** (reference `6edd047f7`) — a mixed
     bump PSBT signs only wallet-owned inputs, leaving the LDK channel input for
     the channel signer.
