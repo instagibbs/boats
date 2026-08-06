@@ -688,9 +688,15 @@ untouched (WD-4).
   server's recourse when the user actualized the channel VTXO output but left
   the channel unresolved; the sweep takes the **whole** channel (single
   `musig(A,S)` output, expiry leaf server's alone). A watchman **policy arm** —
-  the MR-1 forced-match already routes a `channel-funding` VTXO to
-  `decide_action_expiry`; this MR makes that arm live for tracked VTXOs. It is
-  the server's *only* self-initiated on-chain act (WD-16).
+  the MR-1 forced-match routes a `channel-funding` VTXO to
+  `decide_action_channel_funding`: wait before expiry, then a
+  **deadline-bearing claim** (the v0.6.0 watchman split reactions from
+  sweeps, and this output is *contested* from expiry — the holder's bridge
+  keyspend stays valid once its relative timelock matures — so it rides
+  the reaction loop like the hArk forfeit claim, deadline at the first
+  height both paths are live, never the leisurely sweep loop); this MR
+  makes that arm live for tracked VTXOs. It is the server's *only*
+  self-initiated on-chain act (WD-16).
 - **The LDK terminal transition (review, new).** When an expiry sweep — or an
   ancestor sweep that forecloses the funding — makes the virtual funding
   permanently impossible, the LDK node still believes the channel is live and
