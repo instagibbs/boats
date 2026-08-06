@@ -589,9 +589,15 @@ opening | awaiting_upgrade → reaping         -- outstayed the pending bound: d
   only **mismatched ingredients** force-close.
 - **Pending-open resource control**: an `opening`/`awaiting_upgrade` channel
   consumes LDK + DB resources before any cosign, so the subsystem bounds
-  concurrent pending opens per peer and times out/cleans up stale ones. (This
-  is why admission refusals are "no *Ark* state mutation" — the LDK pending
-  channel is real and is reaped by this machine, not by admission.)
+  concurrent pending opens **per peer AND server-wide** (node identities are
+  free to mint, so the per-peer bound alone leaves the total unbounded; the
+  global cap trades that for scoped griefing — a filled cap blocks NEW opens
+  only, never existing channels or ordinary VTXO operations) and times
+  out/cleans up stale ones. (This is why admission refusals are "no *Ark*
+  state mutation" — the LDK pending channel is real and is reaped by this
+  machine, not by admission.) The proof-carrying-open alternative (the
+  `ln_receive_anti_dos` pattern) cannot ride the BOLT open message and is
+  payments-era material.
 - **Reaping is mark-then-close**: the reaper durably marks stale pre-cosign
   rows `reaping`, force-closes the LDK side, and the row is deleted only when
   the close lands (`ChannelClosed`) — no accepted LDK channel ever exists
