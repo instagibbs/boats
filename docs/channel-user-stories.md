@@ -177,14 +177,18 @@ Each of these is a *cannot happen, because* claim, not a policy.
   hurts the declarer. ("Server liquidity adjustment")
 * ✅ A closed-and-paid channel gives the user no second claim: after the
   forfeit, neither commitment nor closing transaction can reach the chain.
-* ✅ An expired HTLC resolves deterministically to the timeout side: only the
-  success path carries the pinned `exit_delta` CSV — the timeout claim is
-  baseline BOLT-3 and strictly leads any late preimage claim — and the
-  success-path delay is priced into the CLTV budget. The
-  success-CSV-equals-pinned-`exit_delta` derivation is guarded by an
+* ✅ A contested on-chain HTLC gives the server a response window: every
+  client-resolving branch carries the pinned `exit_delta` CSV, so the
+  server's preimage claim on a client-offered HTLC always matures at
+  least `exit_delta − 1` blocks ahead of the client's timeout, and its
+  timeout on a server-offered HTLC matures ahead of a late preimage
+  claim whenever the close was timed against the CLTV — the region an
+  adversary controls. The window protects a server that responds within
+  it, and the client-side delay is priced into the client receiver's
+  CLTV budget. The delays-equal-pinned-`exit_delta` derivation is guarded by an
   implementation self-check at the open cosign; the protocol itself
   surfaces a divergence only at the first HTLC's commitment exchange.
-  ("The Ark channel type", HTLC success-path CSV)
+  ("The Ark channel type", party-keyed HTLC claim delays)
 * ✅ Neither side's crash creates a window for the other: everything
   safety-critical is stated as an observable property that must survive a
   crash — close outcomes, teleport promotion, forfeit watching — and a party

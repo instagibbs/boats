@@ -83,8 +83,8 @@ working channel system on an unmodified Lightning implementation that
 exposes manual (application-supplied) funding and application-fed chain
 hooks. Two **extension**
 sections follow the core, and each builds only on what precedes it: "The
-Ark channel type" (a dedicated channel type whose HTLC success-path CSV
-makes forwarding safe against expired-HTLC races) and "Refresh" with "The
+Ark channel type" (a dedicated channel type whose party-keyed HTLC claim
+delays make forwarding safe against expired-HTLC races) and "Refresh" with "The
 teleport protocol" (in-place renewal of the channel's backing VTXO, lifting
 the core's expiry treadmill). A core-only implementation is complete and
 interoperates with itself; each extension adds negotiated capability on
@@ -1230,11 +1230,15 @@ rule unchanged.
 
 ## The Ark channel type
 
-*Extension. This section defines a dedicated channel type whose HTLC
-success-path CSV orders expired-HTLC claims in the offerer's favor. A
-core-only implementation does not negotiate it: its operating profile
-designates a stock channel type instead and restricts HTLC exposure by
-policy.*
+*Extension. This section defines a dedicated channel type whose
+party-keyed HTLC claim delays order contested on-chain HTLC claims in the
+server's favor — on both HTLC directions — within a bounded response
+window. The keying is by party, not by script path, because the server is
+the one peer that can never force the contest to start early: it never
+unrolls (WD-16), so whichever branch is the server's must be the one that
+leads once a commitment confirms. A core-only implementation does not
+negotiate the type: its operating profile designates a stock channel type
+instead and restricts HTLC exposure by policy.*
 
 Under this extension a channel on Ark is not a vanilla BOLT channel: the
 parties negotiating the extension MUST use the dedicated **Ark channel
@@ -1261,69 +1265,263 @@ by CPFP at broadcast (anchor value per BOLT: `min(240 sat, the commitment's
 residual)`, any excess becoming on-chain fee). That is the same P2A and CPFP
 discipline the Ark exit transactions use (ARK #6). Everything else not listed
 below — the `to_local` / `to_remote` outputs, revocation and per-commitment key
-derivation, the base HTLC scripts, and HTLC resolution — is likewise unchanged
-BOLT and is referenced, not restated.
+derivation, and the HTLC script structure apart from the inserted
+client-branch delays — is likewise unchanged BOLT and is referenced, not
+restated.
 
 An Ark channel is interoperable only if both peers reproduce the deviations
 below identically: a mismatch makes the exchanged signatures fail to verify and
 aborts the channel. The funding output is a stock BOLT-3 P2WSH 2-of-2 produced by
 the bridge transaction (see "The channel VTXO and the bridge transaction"), so it
 is **not** a deviation — the channel's two BOLT-3 funding pubkeys are ordinary
-Lightning keys (Actors and keys), and the commitment is an unmodified
-`zero_fee_commitments` commitment (its obscured commitment number rides in
-`nLockTime`/`nSequence` as in BOLT-3 — the bridge, not the commitment, carries
-the exit-delay CSV). The Ark-specific deviations are:
+Lightning keys (Actors and keys), and the commitment is structurally an
+ordinary `zero_fee_commitments` commitment **except for the HTLC output
+scripts below**, whose changed bytes change those outputs' P2WSH hashes
+(its obscured commitment number rides in `nLockTime`/`nSequence` as in
+BOLT-3 — the bridge, not the commitment's own input, carries the
+exit-delay CSV). The Ark-specific deviations are:
 
-* **HTLC success-path CSV.** Each HTLC output's preimage-claim (success) branch
-  gains an extra `<exit_delta> OP_CSV OP_DROP`; the timeout branch carries no
-  extra CSV. Every spend of the success branch — the presigned second-stage
-  HTLC-success transaction and a direct preimage claim of the counterparty's
-  commitment output alike — MUST set `nSequence` to at least `exit_delta` or it
-  is consensus-invalid; the second-stage HTLC-success transaction is presigned
-  with `nSequence = exit_delta`. The second-stage HTLC-timeout transaction is
-  presigned with the baseline `nSequence` (0) — **not** `exit_delta`. The
-  asymmetry is deliberate and normative: these are v3 transactions, so any
-  `nSequence` below `0x80000000` is a real BIP-68 relative timelock, and
-  presigning the timeout template at `exit_delta` would delay the offerer's
-  own timeout claim by the very delta that exists to protect it, turning its
-  head start into a fee-race tie (and re-opening the replacement-cycling
-  window the head start closes). The HTLC signatures commit to `nSequence`,
-  so peers that disagree on either template simply fail to verify each
-  other's signatures. With the asymmetry, a timeout claim strictly leads a
-  preimage claim by `exit_delta` on whichever commitment confirms — the
-  direct timeout claim of a counterparty commitment carries no relative
-  delay either. This is what guarantees that an HTLC whose absolute CLTV
-  expired while the slow exit chain was confirming resolves
-  deterministically to the timeout side rather than racing, so the offerer
-  never depends on out-racing (or extracting a preimage from) a competing
-  claim. This success CSV MUST equal the channel's pinned `exit_delta` (see
+* **Party-keyed HTLC claim delays.** On every commitment HTLC output, every
+  non-revocation branch that resolves to the **client** carries an extra
+  `<exit_delta> OP_CSV OP_DROP`; every branch that resolves to the
+  **server** carries no added CSV. Across the four templates — both HTLC
+  directions on both commitments, direct and second-stage forms alike —
+  that means: on a **server-offered** HTLC the success branch (the
+  client's preimage claim) is delayed and the timeout branch (the server's
+  reclaim) is baseline; on a **client-offered** HTLC the **timeout**
+  branch (the client's reclaim, additionally bound by its absolute CLTV as
+  in BOLT-3) is delayed and the success branch (the server's preimage
+  claim) is baseline. The revocation branch is unchanged and immediate —
+  justice gets no response window, deliberately — and the balance outputs
+  are untouched: they are uncontested, so there is nothing to order.
+
+  The base scripts are the plain BOLT-3 HTLC scripts, **not** the
+  `option_anchors` variants: `zero_fee_commitments` is its own channel
+  type, whose commitment and HTLC transactions are version 3, whose HTLC
+  signatures use `SIGHASH_SINGLE|ANYONECANPAY`, and whose baseline
+  HTLC-transaction input `nSequence` is 0 — there is no anchors-era outer
+  `1 OP_CSV` for the deviation to interact with. The deviation is the
+  inserted client-branch CSV alone.
+
+  Enforcement takes both forms the branches do. A **client** second-stage
+  HTLC transaction — HTLC-success on a server-offered HTLC, HTLC-timeout
+  on a client-offered one — is presigned with `nSequence = exit_delta`:
+  these are version-3 transactions, so any `nSequence` below `0x80000000`
+  is a real BIP-68 relative timelock, and the HTLC signatures commit to it
+  (BIP-143 covers the signed input's `nSequence` under
+  `SIGHASH_SINGLE|ANYONECANPAY`), so peers that disagree on a template
+  fail to verify each other's signatures. A **server** second-stage
+  transaction keeps the baseline `nSequence = 0`. A **direct** client
+  claim of a delayed branch MUST be a transaction of version 2 or later
+  whose HTLC input carries a height-type `nSequence` of at least
+  `exit_delta` with the BIP-68 disable flag clear — the BIP-112 spending
+  conditions the script imposes. Consensus enforces this without
+  cooperation; it is stated normatively because it is an implementation
+  delta: a stock Lightning implementation builds direct
+  counterparty-HTLC claims with a disabled relative locktime
+  (`0xFFFFFFFD`-style sequences), which the delayed branches make
+  consensus-invalid, so client claim construction must switch those
+  inputs to height-based sequences. Only the client side is affected:
+  the server's branches are baseline, and stock construction remains
+  valid for the party that cannot patch its counterparty. The CSV
+  nonetheless remains in the script even where a presigned transaction
+  exists: the contract is the **output's**, not the presigned
+  template's, because the direct spend forms have no peer signature to
+  pin them — and the server may be the party that publishes ("Server
+  recourse after the bridge confirms"). A client can confirm the bridge and then simply stop
+  cooperating, leaving the server to publish its own commitment to recoup
+  its balance and unresolved HTLCs; on the server's commitment the
+  client's competing claims are direct spends. Without the script CSV on
+  those branches, the server's own sanctioned recourse would recreate the
+  very race this type exists to remove.
+
+  The ordering this buys is a **response window**, not an unconditional
+  winner, and it is direction-specific. Let either commitment confirm at
+  height `H`, and let `T` be the HTLC's absolute CLTV. On a
+  **client-offered** HTLC the guarantee is unconditional once the server
+  holds the preimage: its success branch is mineable at `H + 1` while
+  the client's timeout waits for `max(T, H + exit_delta)`, so the server
+  leads by at least `exit_delta − 1` blocks however the close was timed.
+  On a **server-offered** HTLC the server's timeout is mineable at
+  `max(T, H + 1)` and the client's success at `H + exit_delta`: the
+  server leads — by `min(exit_delta − 1, H + exit_delta − T)` — exactly
+  when `T < H + exit_delta`, the late-close region where the CLTV
+  expires while (or before) the exit chain confirms. That is the region
+  an adversary can force, and the one the delay exists for. When the
+  commitment instead confirmed `exit_delta` or more before `T`, the
+  client's intended pre-CLTV claim window is simply open — the honest
+  path — and a contest first arising at `T` is the ordinary post-expiry
+  Lightning race, answered as in stock Lightning by the offerer acting
+  at `T` promptly (the standard fulfillment-deadline discipline), not by
+  script ordering: no relative timelock can hand the offerer a head
+  start at `T` on a long-confirmed commitment without also delaying the
+  receiver's honest pre-`T` claim. In both directions the window is an
+  obligation as much as a protection — the server's response must
+  confirm within it ("On-chain resolution under the delays").
+
+  These delays MUST equal the channel's pinned `exit_delta` (see
   "`exit_delta` is pinned at open" below); both peers use that fixed value
   rather than re-deriving it per update or negotiating it. BOLT-3 has no
-  success-branch CSV. This CSV is a required construction parameter of the Ark
-  channel type, not an optional feature or a defaultable setting: a node MUST
-  NOT advertise, accept, or construct the Ark channel type unless a nonzero
-  success CSV equal to the pinned `exit_delta` is in force on every HTLC
-  success branch, and it MUST validate that binding before it advertises the
-  type or cosigns the open. Both the bridge `nSequence` and the success CSV
-  MUST derive from the single pinned value (see "`exit_delta` is pinned at
-  open" below).
+  per-party branch delays. They are a required construction parameter of
+  the Ark channel type, not an optional feature or a defaultable setting:
+  a node MUST NOT advertise, accept, or construct the Ark channel type
+  unless a nonzero delay equal to the pinned `exit_delta` is in force on
+  every client-resolving HTLC branch of both commitments, and it MUST
+  validate that binding before it advertises the type or cosigns the open.
+  Both the bridge `nSequence` and the HTLC-script delays MUST derive from
+  the single pinned value (see "`exit_delta` is pinned at open" below).
+  The party assignment is unambiguous by construction — the server is the
+  acceptor of every channel under this extension — and both peers MUST
+  reproduce the same four beneficiary-keyed templates when constructing or
+  recovering either commitment. Semantic branch placement is not enough:
+  byte-distinct insertions produce different P2WSH hashes, so the
+  templates below are **normative**. Each is the BOLT-3
+  non-`option_anchors` script whose revocation prefix (`OP_DUP OP_HASH160
+  <RIPEMD160(SHA256(revocationpubkey))> OP_EQUAL OP_IF OP_CHECKSIG`) is
+  byte-unchanged and elided here for readability only — it is part of the
+  script and its hash. `<pinned_exit_delta>` and `<cltv_expiry>` are
+  pushed with minimal script-number encoding. An implementation MUST pin
+  one serialized test vector per template before it advertises the type —
+  no such vectors exist yet, because no implementation of the type does.
 
-  The same invariant binds a channel restored from persistence: a stored scope
-  whose success CSV is absent, zero, or too large for its CLTV floor MUST NOT
-  be resumed or offered new HTLCs — and the CSV cannot be repaired from current
-  configuration, since the commitment scripts it appears in are already signed.
-  Force-closing the scope (or keeping it fail-closed) is the only safe
-  disposition.
+  *Server-offered HTLC, on the server's commitment (offered-HTLC
+  script):*
 
-* **HTLC CLTV budget.** A receiver MUST reject an incoming HTLC whose CLTV
-  budget is too small, and the channel's minimum `cltv_expiry_delta` MUST be at
-  least `2 * pinned_exit_delta + channel_max_vtxo_exit_depth +
-  cltv_safety_margin`. Resolving an HTLC on-chain crosses **two**
+  ```
+      OP_ELSE
+          <remote_htlcpubkey> OP_SWAP OP_SIZE 32 OP_EQUAL
+          OP_NOTIF
+              # To local node (SERVER) via HTLC-timeout transaction (timelocked).
+              OP_DROP 2 OP_SWAP <local_htlcpubkey> 2 OP_CHECKMULTISIG
+          OP_ELSE
+              # To remote node (CLIENT) with preimage.
+              OP_HASH160 <RIPEMD160(payment_hash)> OP_EQUALVERIFY
+              <pinned_exit_delta> OP_CHECKSEQUENCEVERIFY OP_DROP
+              OP_CHECKSIG
+          OP_ENDIF
+      OP_ENDIF
+  ```
+
+  *Server-offered HTLC, on the client's commitment (received-HTLC
+  script):*
+
+  ```
+      OP_ELSE
+          <remote_htlcpubkey> OP_SWAP OP_SIZE 32 OP_EQUAL
+          OP_IF
+              # To local node (CLIENT) via HTLC-success transaction.
+              OP_HASH160 <RIPEMD160(payment_hash)> OP_EQUALVERIFY
+              <pinned_exit_delta> OP_CHECKSEQUENCEVERIFY OP_DROP
+              2 OP_SWAP <local_htlcpubkey> 2 OP_CHECKMULTISIG
+          OP_ELSE
+              # To remote node (SERVER) after timeout.
+              OP_DROP <cltv_expiry> OP_CHECKLOCKTIMEVERIFY OP_DROP
+              OP_CHECKSIG
+          OP_ENDIF
+      OP_ENDIF
+  ```
+
+  *Client-offered HTLC, on the client's commitment (offered-HTLC
+  script):*
+
+  ```
+      OP_ELSE
+          <remote_htlcpubkey> OP_SWAP OP_SIZE 32 OP_EQUAL
+          OP_NOTIF
+              # To local node (CLIENT) via HTLC-timeout transaction (timelocked).
+              OP_DROP
+              <pinned_exit_delta> OP_CHECKSEQUENCEVERIFY OP_DROP
+              2 OP_SWAP <local_htlcpubkey> 2 OP_CHECKMULTISIG
+          OP_ELSE
+              # To remote node (SERVER) with preimage.
+              OP_HASH160 <RIPEMD160(payment_hash)> OP_EQUALVERIFY
+              OP_CHECKSIG
+          OP_ENDIF
+      OP_ENDIF
+  ```
+
+  *Client-offered HTLC, on the server's commitment (received-HTLC
+  script):*
+
+  ```
+      OP_ELSE
+          <remote_htlcpubkey> OP_SWAP OP_SIZE 32 OP_EQUAL
+          OP_IF
+              # To local node (SERVER) via HTLC-success transaction.
+              OP_HASH160 <RIPEMD160(payment_hash)> OP_EQUALVERIFY
+              2 OP_SWAP <local_htlcpubkey> 2 OP_CHECKMULTISIG
+          OP_ELSE
+              # To remote node (CLIENT) after timeout.
+              OP_DROP <cltv_expiry> OP_CHECKLOCKTIMEVERIFY OP_DROP
+              <pinned_exit_delta> OP_CHECKSEQUENCEVERIFY OP_DROP
+              OP_CHECKSIG
+          OP_ENDIF
+      OP_ENDIF
+  ```
+
+  The added script bytes change HTLC witness sizes and second-stage
+  weights, so implementations MUST recompute weight and fee constants
+  from the amended scripts rather than reusing stock values.
+
+  The same invariant binds a channel restored from persistence: a stored
+  scope whose client-branch delays are absent, zero, or too large for its
+  CLTV floor MUST NOT be resumed or offered new HTLCs — and the delays
+  cannot be repaired from current configuration, since the commitment
+  scripts they appear in are already signed. Force-closing the scope (or
+  keeping it fail-closed) is the only safe disposition.
+
+* **On-chain resolution under the delays.** The off-chain CLTV semantics
+  are unchanged, but no client branch of a confirmed HTLC output is
+  on-chain eligible before `confirmed_at + exit_delta`, and a client
+  timeout additionally waits for its absolute CLTV — its threshold is
+  `max(cltv_expiry, confirmed_at + exit_delta)`. Monitoring,
+  payment-failure reporting, persistence, and claim pruning MUST use that
+  contract: an HTLC is not terminal merely because its CLTV passed, and a
+  known preimage MUST be retained until its output is conclusively spent.
+  The window also obligates the server: the response MUST confirm inside
+  it, after which the contest is an ordinary fee race again — so a server
+  operating this extension MUST run a persistent chain watcher and hold
+  confirmed fee inputs with rebroadcast and replacement logic for its
+  claims. Each claim MUST be broadcast promptly at its maturity — a
+  preimage claim on a client-offered HTLC at the commitment's
+  confirmation, a timeout claim on a server-offered HTLC at
+  `max(T, H + 1)` (its CLTV, or the block after confirmation, whichever
+  is later) — and the response window is not slack: where the competing
+  branch is already mature (a server-offered HTLC whose commitment
+  confirmed `exit_delta` or more before its CLTV), there is no window at
+  all, only the ordinary post-expiry race, and every block of delay past
+  maturity is surrendered lead. The shared P2A anchor belongs to the commitment, not to the HTLC
+  resolutions, which bring their own fees; and while the commitment is
+  unconfirmed, TRUC's one-unconfirmed-child rule means claims cannot fan
+  out beneath it — claim scheduling MUST respect that topology and the
+  TRUC child-size limit rather than assume arbitrary parallel HTLC
+  children. A **trimmed** HTLC has no output and therefore no branch to
+  order: dust-exposure bounds (`max_dust_htlc_exposure_msat`-style) MUST
+  be retained under this extension, and a deployment claiming no
+  forwarded collect-leg loss MUST NOT forward an HTLC that is trimmed
+  from either commitment. Finally, the delayed client timeout is safe to
+  impose only because clients under this extension are endpoints: a
+  client MUST NOT forward HTLCs over an Ark channel — a deployment that
+  wants client forwarding must first re-derive the timing profile, since
+  a delayed refund on a forwarding node becomes upstream risk.
+
+* **HTLC CLTV budget.** This budget is the **client receiver's**: it
+  prices the serial chain a receiver who can unroll climbs, and the
+  server never climbs it — it cannot initiate the unroll. Its enforcement
+  point is **per-HTLC acceptance**, and its advertisement is the
+  invoice's `min_final_cltv_expiry_delta` (BOLT 11): a client receiver
+  MUST reject an incoming HTLC whose remaining CLTV budget is below
+  `2 * pinned_exit_delta + channel_max_vtxo_exit_depth +
+  cltv_safety_margin`, and MUST NOT issue an invoice advertising less.
+  The channel-level `cltv_expiry_delta` (BOLT 7) is a *forwarding*
+  parameter, not this budget's carrier — clients under this extension do
+  not forward, and the server's forwarding delta follows the core floor
+  ("The force-close deadline"). Resolving a received HTLC on-chain crosses **two**
   `pinned_exit_delta` delays in series: first to get
   the **commitment** confirmed — force-closing *through* the VTXO exit takes up to
   `channel_max_vtxo_exit_depth` genesis levels (ARK #0) plus the bridge, whose
   input is time-locked `pinned_exit_delta` — and then, on the confirmed
-  commitment, the **HTLC success-path CSV** (above) delays the preimage claim a
+  commitment, the **client-claim delay** (above) holds the preimage claim a
   further `pinned_exit_delta`. Both must complete before the HTLC's absolute CLTV (after
   which the offerer's timeout path opens), which is why `pinned_exit_delta` appears
   twice. The serial chain a force-close climbs before the preimage claim is valid:
@@ -1336,7 +1534,7 @@ the exit-delay CSV). The Ark-specific deviations are:
           │  pinned_exit_delta    (bridge input nSequence CSV)
           ▼
      bridge confirmed → commitment confirms (no extra delay of its own)
-          │  pinned_exit_delta    (HTLC success-path CSV)
+          │  pinned_exit_delta    (client-claim delay CSV)
           ▼
      HTLC-success spend valid  ── must land before the HTLC's absolute CLTV ──
   ```
@@ -1345,17 +1543,26 @@ the exit-delay CSV). The Ark-specific deviations are:
   `channel_max_vtxo_exit_depth = 16`): the
   floor is `2·144 + 16 + cltv_safety_margin = 304 + cltv_safety_margin` blocks
   (~2.1 days before the buffer; the reference sizes the margin at 18 blocks,
-  for a 322-block floor). The common error is to budget only the success-path
-  CSV — `1·pinned_exit_delta + cltv_safety_margin` — and fold the rest into the margin;
+  for a 322-block floor). The common error is to budget only the on-commitment
+  claim delay — `1·pinned_exit_delta + cltv_safety_margin` — and fold the rest into the margin;
   that under-counts by a whole `pinned_exit_delta + channel_max_vtxo_exit_depth` and lets the
   offerer's timeout win the on-chain race. `cltv_safety_margin` is the ordinary
   Lightning confirmation buffer, but
   for an Ark channel it MUST be sized larger: it absorbs confirmation variance
   across the **whole serial chain** a force-close climbs — up to
   `channel_max_vtxo_exit_depth` genesis levels, then the bridge, the commitment, and the
-  success-path claim — each budgeted at a single block in the floor but any of
+  delayed success claim — each budgeted at a single block in the floor but any of
   which can run longer under fee pressure (the non-Ark race is only
-  commitment-then-claim). The exit-derived terms come from
+  commitment-then-claim).
+
+  The **server's** acceptance rule is watch-and-claim, not this budget:
+  its claim branches are baseline once either commitment confirms, and
+  its safety is the response window above — which is why
+  `pinned_exit_delta` MUST be sized to cover the server's watch latency,
+  broadcast, confirmation, and reorganization margin after either
+  commitment appears. The core's forwarding delta floor ("The force-close
+  deadline") remains the room for the preimage to *arrive* on the
+  incoming leg; it is not a substitute for that sizing. The exit-derived terms come from
   the channel's pinned `exit_delta` (below) and from its pinned
   `channel_max_vtxo_exit_depth`, so both peers compute the same floor given the
   same buffer; each enforces it from its own configuration, not on the wire.
@@ -1367,14 +1574,18 @@ the exit-delay CSV). The Ark-specific deviations are:
   floor across the channels it could receive on, so the budget holds whichever
   channel the payment lands on (the value is fixed when the invoice is issued). A
   payment that carries *no* receiver-committed CLTV floor — a **spontaneous
-  (keysend) payment**, which has no invoice `min_final_cltv_expiry_delta` — cannot
-  be budgeted this way at all, so a receiver MUST reject a keysend HTLC on an Ark
-  channel (the reference fails it back). Keysend is therefore **unsupported**
-  under this extension for now. The core's per-HTLC acceptance check ("The
-  force-close deadline") is the natural relaxation — applied against this
-  extension's larger floor it would budget keysend per-HTLC with no
-  advertisement at all — and adopting it here is future work, pending its own
-  review.
+  (keysend) payment**, which has no invoice `min_final_cltv_expiry_delta` —
+  can still be *checked*: the per-HTLC acceptance rule above applies to
+  every incoming HTLC, keysend included, so safety is never the issue.
+  What keysend lacks is the advertisement — its sender has no way to learn
+  the required floor, so a keysend either arrives over-budgeted by luck or
+  fails the check blind, inviting blind retries. The reference therefore
+  rejects keysend HTLCs on Ark channels as **policy** (a clean refusal
+  over blind retries; it fails them back), and keysend is unsupported
+  under this extension for now. Accepting floor-compliant keysends is
+  future work, pending review of the sender-experience and probing
+  implications — not of the budget, which the per-HTLC check already
+  enforces.
   `channel_max_vtxo_exit_depth`
   is also the upper bound the budget assumes on the **channel VTXO's own** exit
   depth — the number of genesis levels a force-close must climb: a channel VTXO
@@ -1385,19 +1596,23 @@ the exit-delay CSV). The Ark-specific deviations are:
   This budget **extends the core's floor** `F` ("The force-close deadline"):
   the two share the genesis-plus-bridge prefix
   (`channel_max_vtxo_exit_depth + pinned_exit_delta`), and the budget adds
-  the success-path CSV's second `pinned_exit_delta`, served on the confirmed
+  the client-claim delay's second `pinned_exit_delta`, served on the confirmed
   commitment. The per-HTLC threshold under this extension is therefore
   `max(F, budget)` — the budget is the active term exactly when it is the
   larger, the two margins being set independently — never their sum, which
   would double-count the shared prefix.
 
   Every timing-profile calculation MUST use checked arithmetic in a type wider
-  than its encoded fields. BOLT's channel `cltv_expiry_delta` is a `u16`, so the
-  complete floor
+  than its encoded fields. As a **profile restriction**, the complete floor
   `2 * pinned_exit_delta + channel_max_vtxo_exit_depth + cltv_safety_margin`
-  MUST be no greater than `65535`, and a node MUST NOT advertise, open, or
-  accept an Ark channel whose complete floor is unrepresentable or whose
-  configured CLTV floor is smaller. An implementation that enforces the floor's
+  MUST be no greater than `65535`: the invoice's
+  `min_final_cltv_expiry_delta` is itself variable-length (BOLT 11), but
+  components of the floor ride `u16` carriers elsewhere — the channel-level
+  `cltv_expiry_delta` where the server forwards, and implementation
+  configuration fields — and one representable bound for the whole profile
+  is simpler and safer than per-carrier exceptions. A node MUST NOT
+  advertise, open, or accept an Ark channel whose complete floor exceeds
+  that bound or whose configured CLTV floor is smaller. An implementation that enforces the floor's
   terms in separate layers MUST still check the complete floor before the
   channel is enabled. Saturating an overflowing floor is non-conforming: it
   silently admits HTLCs with less time than the on-chain path requires.
@@ -1407,8 +1622,8 @@ the exit-delay CSV). The Ark-specific deviations are:
   on-chain (see "Trust assumptions").
 
 **`exit_delta` is pinned at open.** A channel's `exit_delta` — the value on the
-bridge input's `nSequence`, in the HTLC success-path CSV, and in the CLTV budget
-above — is fixed **once, at open** — the input VTXO's decoded `exit_delta`
+bridge input's `nSequence`, in the HTLC scripts' client-claim delays, and in the
+CLTV budget above — is fixed **once, at open** — the input VTXO's decoded `exit_delta`
 ("Open by upgrade") — and is
 thereafter a fixed parameter of the channel. Both parties MUST store it (with the
 channel's other parameters, keyed by `channel_id`) and use the stored value for
@@ -1417,15 +1632,15 @@ every later commitment; neither re-reads
 it. Cross-peer agreement is enforced at open by the **bridge cosign**: the
 `musig(A, S)` key-path sighash commits the bridge input's `nSequence`, so peers
 holding different values fail to verify each other's partial signatures and the
-open aborts with nothing on-chain. The **HTLC success-path CSV is not what
-catches a disagreement**: the initial commitment carries no HTLC outputs, so
-nothing signed at establishment commits to the success CSV, and a divergence
-confined to it — one peer's success CSV drifting from its own bridge
+open aborts with nothing on-chain. The **HTLC-script delays are not what
+catch a disagreement**: the initial commitment carries no HTLC outputs, so
+nothing signed at establishment commits to them, and a divergence
+confined to them — one peer's client-claim delay drifting from its own bridge
 `nSequence` — stays hidden through a successful open and surfaces only at the
 first HTLC's commitment exchange, whose signatures fail to validate and
 force-close an established channel *after* the open's registration point of
-no return. An implementation MUST therefore derive the success
-CSV and the bridge `nSequence` from the single pinned value rather than
+no return. An implementation MUST therefore derive the HTLC-script
+delays and the bridge `nSequence` from the single pinned value rather than
 configuring them independently: the protocol re-verifies the bridge copy at
 every cosign, but a split between a peer's own two copies is caught by nothing
 until that first-HTLC force-close.
@@ -2013,9 +2228,11 @@ that stand in for the extensions' protections:
   `pubkey` VTXOs in an ordinary round, and re-open by upgrade. Clients
   SHOULD schedule the downgrade proactively.
 * **HTLC exposure is bounded by policy, not by script.** Without the type
-  extension's success-path CSV, an expired HTLC's on-chain
+  extension's party-keyed claim delays, an expired HTLC's on-chain
   timeout-versus-preimage contest is a fee race with no consensus-ordered
-  head start. The core's floor `F` removes the deterministic losses; the
+  head start — including the server's own preimage claims on
+  client-offered (collect-leg) HTLCs, where the offerer chooses when the
+  contest can begin. The core's floor `F` removes the deterministic losses; the
   residual race is bounded operationally — conservative per-HTLC value caps
   and in-flight limits on channels the server forwards over, with the
   forwarding `cltv_expiry_delta` at or above `F`. Forwarding is otherwise
@@ -2042,8 +2259,10 @@ that stand in for the extensions' protections:
 ### Profile: extended
 
 The core plus both extensions: the Ark channel type replaces the per-HTLC
-race exposure with the success-path CSV's ordered claims (raising the
-per-HTLC threshold to its budget), and refresh lifts the expiry treadmill.
+race exposure on **materialized HTLC outputs** with the party-keyed claim
+delays' server response window (raising the client receiver's per-HTLC
+threshold to its budget); trimmed HTLCs have no output to order, so
+dust-exposure bounds remain. Refresh lifts the expiry treadmill.
 The intermediate profiles — the core plus exactly one extension — are
 coherent, since each extension stands alone on the core, but they are not
 deployment targets of the reference.

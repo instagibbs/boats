@@ -2,8 +2,15 @@
 
 **Date**: 2026-08-06. **Severity**: design defect in the Ark-channel type
 extension (`08-channels.md`); no shipped code is affected (stage 1 carries
-no channel HTLCs). **Status**: written finding; the spec amendment follows
-review of this document.
+no channel HTLCs). **Status**: addressed — the party-keyed amendment landed
+in `08-channels.md` ("The Ark channel type"), then revised per proxy
+review: the response window stated conditionally (competing claims only),
+normative BIP-112 transaction requirements for direct client claims (with
+the stock-LDK `ENABLE_RBF_NO_LOCKTIME` construction delta named), the four
+templates made normative in-spec with minimal-encoding and per-template
+vector requirements, and the receiver budget re-carried onto per-HTLC
+acceptance + invoice `min_final_cltv_expiry_delta` (the u16 bound
+restated as a profile restriction).
 
 ## The finding
 
@@ -362,13 +369,16 @@ solves it" without re-deriving which branches the CSV must sit on.
 ## Disposition
 
 1. Shipped code: unaffected (no channel HTLCs exist in stage 1).
-2. `08-channels.md` type extension: MUST be amended to the party-keyed
-   `zero_fee_commitments` scripts above before any stage-2 implementation
-   work. The extended-profile claim, directional CLTV-budget framing,
-   on-chain resolution semantics, role-aware construction and weight
-   accounting, watcher/fee obligations, client-endpoint restriction (or
-   replacement forwarding analysis), and residual dust exposure are
-   corrected in the same pass. This document is the amendment's input.
+2. `08-channels.md` type extension: **amended** (see Status) — the
+   party-keyed `zero_fee_commitments` scripts are normative in-spec, and
+   the extended-profile claim, directional CLTV-budget framing, on-chain
+   resolution semantics, role-aware construction and weight accounting,
+   watcher/fee obligations, client-endpoint restriction, and residual
+   dust exposure were corrected in the same pass. What remains are the
+   implementation obligations the spec now states: per-template
+   serialized vectors before the type is ever advertised, and the LDK
+   claim-construction changes (height-based sequences on direct client
+   claims).
 3. Payments-era planning (the M4/payments G1): the stock-script collect
    leg is stated honestly as the landing-window fee race, bounded by
    caps and the unroll-watch policy trigger; the per-party scripts are

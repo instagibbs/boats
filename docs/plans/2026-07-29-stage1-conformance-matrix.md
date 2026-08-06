@@ -15,10 +15,20 @@
 
 **Purpose**: the requirement checklist a stage-1 implementation (upgrade/downgrade
 channel-VTXO lifecycle on stock LDK, no teleport, no Ark channel type / HTLC
-success CSV) must satisfy, extracted from the spec, plus the places where
+claim-delay machinery) must satisfy, extracted from the spec, plus the places where
 stage-1 text was entangled with excluded mechanisms (which drove the spec
 restructure) and the requirements impossible or meaningless without them (which
 became the first-release profile's relaxations — now landed).
+
+> **Amendment note (2026-08-06)**: the Ark channel type's HTLC deviation was
+> respecified from a path-keyed "success-path CSV" to **party-keyed claim
+> delays** (every client-resolving branch waits `exit_delta`; server branches
+> baseline) after the collect-leg finding
+> (`docs/plans/2026-08-06-channel-htlc-collect-leg-finding.md`). Rows below
+> that say "success-path CSV" (E-9, E-10, I-4, I-7) were extracted against the
+> pre-amendment text; their stage-1 conclusions are unaffected — the excluded
+> machinery is excluded either way, and the dropped second `pinned_exit_delta`
+> in I-4 is the (client-claim) on-commitment delay under either naming.
 
 **Source**: spec working tree at bookmark `phase4_deletions` (`9f1c7fd`), where
 open = upgrade and close = downgrade are the only open/close mechanisms.
@@ -29,7 +39,8 @@ Files: `08-channels.md` (repo root), `05-arkoor.md`, `02-vtxo.md`,
 **Excluded from stage 1** (for reference): channel refresh (`08-channels.md`
 §"Refresh" ~702–908, §"The teleport protocol" ~909–1109, `leaf_vtxo_cosign`
 ~1679–1715, round-participation response cap ~1800–1814) and the Ark channel
-type / HTLC-success-CSV machinery (§"The Ark channel type" ~238–449).
+type / HTLC claim-delay machinery (§"The Ark channel type" ~238–449; party-keyed
+since the 2026-08-06 amendment).
 
 **Disambiguation used throughout**: the spec uses "refresh" for two things.
 (1) **Channel refresh** = round+teleport re-pointing of a channel's backing
