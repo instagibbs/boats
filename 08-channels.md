@@ -204,7 +204,7 @@ Lightning funding output.
 ### The channel VTXO output
 
 A channel VTXO's output carries the `channel-funding` policy (ARK #2, type byte
-`0x08`):
+`0x0c`):
 
 * internal key `musig(A, S)` — the cooperative 2-of-2 (`A` = the policy's
   `user_pubkey`, `S` = the VTXO's `server_pubkey`; ARK #2). This is the path the
@@ -2046,7 +2046,7 @@ The channel work extends the protocol without disturbing existing flows.
   advertises channel support with the `supports_channels` flag in ark info
   (ARK #0); a client MUST NOT attempt a channel open against a server that does
   not set it.
-* **New policy type.** A `channel-funding` VTXO (policy type `0x08`) is rejected
+* **New policy type.** A `channel-funding` VTXO (policy type `0x0c`) is rejected
   by decoders that predate it (ARK #2 decoders reject unknown policy type
   bytes), so channel VTXOs are meaningful only between channel-aware parties.
 

@@ -146,7 +146,7 @@ Fields: `user_pubkey` (33) ‖ `payment_hash` (32) ‖ `htlc_expiry` (u32) ‖
   — user claims with the preimage; the longer delay gives the server time to
   use its expiry path if the user exits too late
 
-#### `channel-funding` (type byte `0x08`)
+#### `channel-funding` (type byte `0x0c`)
 
 The backing output of a Lightning-channel VTXO (ARK #8). It is *not* the
 channel's funding outpoint: the funds reach the Lightning commitment through a
