@@ -7,7 +7,7 @@ individually (3 / 5 / 5 / 9 rounds); this pass judged cross-commit
 coherence, the seams, spec-vs-shipped drift, and upstream readiness —
 what the per-commit passes structurally could not see.
 
-**Verdict**: HOLD → resolved. 2 Blockers, 2 Should-fix, 1 Nit; the Nit's
+**Verdict**: HOLD → resolved (a confirmation pass then caught two doc/message stragglers of the Blocker fixes — the code was already correct — now also fixed). 2 Blockers, 2 Should-fix, 1 Nit; the Nit's
 "embedded tabs" half was a codex misjudgment (verified below). All
 addressed; the series is now clean.
 
@@ -71,6 +71,20 @@ failed back, no relayed LDK broadcast; the one accepted residual (a
 foreclosed channel is closable one block later, reactive detection,
 benign under no-payments) is part 4's. No internal MR/round/codename
 leakage in code, comments, or the commit messages.
+
+## Confirmation pass (round 2)
+
+A narrow re-review confirmed S3/S4/N5 closed but found B1 and B2 had
+DOC/MESSAGE stragglers the code fixes missed: commit 2's message still
+claimed "per-tranche fee-bump reserves" and the `channels/mod.rs` module
+doc still named a "fee-bump reserve ledger" (B1); commit 4's message
+still described the "exact-tip cursor handoff" its own body contradicted
+(B2). All three were text-only (the code was correct) and are now fixed
+in the owning commits via change-ids. (A jj divergence occurred applying
+them — foreground `jj describe` of hashes a background per-commit-check
+task had concurrently rewritten — recovered with `jj op restore`; lesson:
+never run foreground jj mutations while a background jj task runs, and
+address commits by stable change-id, not commit hash.)
 
 ## Post-resolution verification
 
