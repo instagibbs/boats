@@ -156,3 +156,75 @@ heavy exit tests run to completion — their >180s nextest overrun is
 pre-existing bdk per-block sync latency, noted for a future
 slow-timeout override); per-commit bark-wallet units 120/120/122 at
 c1/c2/c3's own trees.
+
+## Coverage round (post-push): two real bugs, three e2e, all folded
+
+Prompted by the "are we missing anything obvious" question, the gap
+list from this review's own analysis was executed: the plan's §10
+promised a double-drive reentrancy run that had never been run, and
+cancel / mixed-portfolio / expiry-race e2e that were never built. All
+green now — and the push paid for itself immediately:
+
+**Bug 1 (double-drive's first-ever run over the channel tests, 3/4
+FAIL):** the establishment step CONSUMED the stashed
+`FundingGenerationReady` payload — the first drive advanced, an
+immediate re-drive found the stash empty and parked, violating the
+wallet-action reentrancy contract. Fixed in the open commit: the stash
+is peeked, never taken; a validation refusal re-derives from the
+retained entry; a superseded attempt discards explicitly; adopting the
+durable establishment capture discards the payload at the one
+chokepoint every post-funding drive crosses.
+
+**Bug 2 (the new cancel e2e, first run):** the exit movement carried a
+deterministic action id (`channel-exit.<channel id>`) under
+`bark_movements.action_id`'s UNIQUE index — the movement a CANCELED
+attempt leaves behind blocked every later exit of the same channel. A
+canceled exit was permanently un-redoable: a genuine liveness bug in
+the shipped series. Fixed in the exit commit: the movement carries no
+action id (a channel exit is not a wallet action; the record's
+`movement_id` is the linkage; a canceled attempt is history, not a
+lock).
+
+**The three e2e** (test additions folded into the exit commit): the
+cancel lifecycle (restore-to-usable, idempotent repeat, refusal past
+the bridge); the mixed portfolio (a channel exit and a generic VTXO
+exit concurrently, a second channel asserted Ready every iteration
+with a bounded-gap usability watchdog); the expiry race lost by design
+(the watchman's foreclosure observed on-chain via the spent chain
+anchor; the late exit engages but never fabricates a terminal — live
+state per tick plus the append-only history both stay clear, closing
+the swept-demotes-between-samples gap).
+
+Codex on the follow-up content: round 1 PASSED both fixes, FAILED the
+two tests' assertion strength (final-only checks); round 2 PASSED the
+tightened continuous assertions ("the 120s watchdog honestly
+accommodates the default 60s daemon cadence"; "`update_state_if_newer`
+appends the prior state… the scan closes the demotion gap").
+
+Everything was then folded into the owning commits per the
+logical-units rule (the bark series was force-push-eligible): the peek
+fix into "bark: the channel open" (+ its message gains the re-drive
+contract and the double-drive e2e line), the action-id fix and the
+three tests into "bark: the channel exit" (+ its message's initiation
+and e2e paragraphs extended). The folded tip tree is byte-identical to
+the tree the closing battery validated: 124 units, fast-4, fast-4
+under double-drive, cancel+expiry, mixed (426s tightened), heavy pair
+(735s) — all at the exact tip; folded c3 re-verified 122/0 at its own
+tree.
+
+Final series after the fold (+ the nextest override): c1 `cb89d366`,
+c2 `7a7e3f71`, c3 `7adede29`, c4 `5a357540` (bookmark
+`ark8-channels-stage1-client`; requires a force-push — the pre-fold
+series was already pushed).
+
+The nextest slow-timeout override landed with the round (folded into
+the exit commit): the three long-running exit e2e get
+`period = 120s, terminate-after = 8` in every profile, and the trio
+passes under parallel nextest (365-371s each) — the whole suite runs
+under plain `just int-bark-sdk` again.
+
+Named residuals (unchanged, documented above and in the c4 record):
+the late-`transactions_confirmed` crash seam, `Theirs` sweeps
+(dead-by-invariant), abandoned-revisit feerate cycling,
+server-vanishes-mid-open, and the payments-milestone
+terminal-accounting debts.
