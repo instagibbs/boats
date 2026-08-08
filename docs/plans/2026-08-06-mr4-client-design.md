@@ -517,9 +517,12 @@ learned one alternate hydration path):
   generic code reads `clause.sequence()`.
 - **The driver trait** (exit crate stays LDK-free; the impl lives with
   the node): `feed_confirmation` / `feed_unconfirmation` /
-  `obtain_commitment` / `pump(tip)` / `pending_claims()` — the old
-  branch's driver surface, re-cut. Durability lives in the exit state
-  + the channel record + the broadcast queue, never in the driver.
+  `obtain_commitment` / `pump(tip)` / `pending_claims()` /
+  `healthy()` / `reset_sweep_attempts()` / `expected_maturity_count()`
+  — the old branch's driver surface, re-cut and extended by the
+  terminal barrier. Durability lives in the exit state + the channel
+  record + the node's persisted descriptors and close-event captures,
+  never in the driver.
 - *ChannelBridge*: broadcast + CPFP the bridge (its P2A anchor is a fee
   **attachment point**; fees come from confirmed wallet inputs — the §7
   reserve exists precisely so this step is fundable) via
@@ -530,33 +533,54 @@ learned one alternate hydration path):
   funding, else force-close and take LDK's commitment **from the live
   monitor, never a stored snapshot** (the revoked-snapshot hazard, kept
   verbatim). The `ChannelClose` bump event that carries it was durably
-  captured by the broadcaster queue (§5) at emission time.
-- *ChannelCommitment*: pump the driver each tick (drain the broadcast
-  queue → track/CPFP through the exit manager; feed watched-output
-  spends — the old branch's justice-loop fix: spends of commitment
-  outputs must be fed back or LDK re-broadcasts a spent claim forever;
-  feed unconfirmations on reorg and re-ask for the winning commitment).
-  **Both sweep families are handled**: on our commitment, `to_local`
-  arrives as a delayed `SpendableOutputs` descriptor; on a counterparty
-  commitment, our balance arrives as `StaticPaymentOutput`. Sweeps go
-  through the output spender with the honest caveat pinned: a
-  descriptor whose value cannot cover its fee at the target rate is
-  unsweepable standalone — batch it with other descriptors or wallet
-  inputs, and accept a documented dust residual below that. The dust
-  allowance and the terminal predicate are reconciled explicitly: the
-  driver's `pending_claims()` view is the persisted descriptor rows
-  **minus** rows marked `abandoned_uneconomical` (marked when the
-  value cannot cover its marginal fee and batching cannot rescue it
-  across a configured number of ticks; rows are kept for audit, and
-  un-abandoned if fee rates fall enough during the exit's life).
-  **`pending_claims()` is monitor-backed, not descriptor-backed**: its
-  primary source is the live monitors' `get_claimable_balances()` —
-  LDK knows of delayed/maturing outputs *before* any
-  `SpendableOutputs` descriptor is emitted, so an empty descriptor
-  table proves nothing — unioned with persisted descriptors, minus
-  the abandoned set. Terminal only when the commitment and every
-  known sweep are hash-stably confirmed and that monitor-backed view
-  is empty.
+  captured in the dedicated close-event table at emission time (the
+  broadcast queue is a capture-only audit; nothing reads it back on
+  the recovery path).
+- *ChannelCommitment*: pump the driver each tick — advance the node's
+  chain view (recording every announced `ClaimableAwaitingConfirmations`
+  balance into a durable **expectation ledger** immediately before each
+  monitor best-block advance, and only advancing when the tip genuinely
+  moved), build **one self-fee-paying sweep per matured output**
+  through LDK's own spender (persisted and reused verbatim — no
+  RBF/rebuild path; a competing spender does not exist for these
+  outputs, so a stale rate only slows confirmation), and broadcast the
+  returned sweeps directly each tick until they confirm; feed sweep
+  confirmations back (the old branch's justice-loop fix: spends of
+  commitment outputs must be fed back or LDK re-broadcasts a spent
+  claim forever); feed unconfirmations on reorg and re-ask for the
+  winning commitment. **Both sweep families are handled**: on our
+  commitment, `to_local` arrives as a delayed `SpendableOutputs`
+  descriptor; on a counterparty commitment, our balance arrives as
+  `StaticPaymentOutput` (the sweep's kind is derived from the
+  descriptor's own shape). A descriptor whose value cannot cover its
+  own claim fee is marked `abandoned` — which suppresses sweep
+  attempts, **never terminal accounting**: the output remains a
+  counted obligation (funds are never silently written off), and the
+  row is un-abandoned if fee rates fall during the exit's life; there
+  is no wallet-input batching and no dust write-off in this design.
+  **The terminal predicate is a layered barrier**, each layer forced
+  by a review round: (a) the node must be **healthy** — driver
+  actually running and not stopped over a persist failure — rechecked
+  at the terminal transition itself; (b) `pending_claims()` is the
+  live monitors' `get_claimable_balances()` (opaque, self-clearing)
+  unioned with **every** persisted descriptor, abandoned included;
+  (c) swept-ness is **state-derived** — a descriptor counts as
+  recovered only when a hash-stably confirmed sweep in the exit
+  state's own rows spends its outpoint, never via a mutable flag;
+  (d) the **expectation ledger** (amount-keyed — a reorg re-announces
+  the same output at a fresh maturity height but the same amount)
+  requires a persisted descriptor for every announced maturity, so a
+  matured output whose descriptor the background event handler has
+  not yet persisted still blocks terminal; (e) the ledger count is
+  **floored at one** — every commitment owes the client exactly one
+  non-dust output while payments are disabled (client funds the whole
+  channel, push refused by the server, LDK's own minimum channel
+  value) — which also covers an output first discovered by a late
+  `transactions_confirmed` (a confirmation fed when the monitor is
+  already past the output's CSV maturity matures it inside that call,
+  before any awaiting balance ever spans a snapshot). Terminal only
+  when the commitment and every known sweep are hash-stably confirmed
+  and nothing is owed under all five layers.
 - *ChannelSwept*: a **recovering terminal** — re-validates its sweeps'
   block hashes each tick and drops back to `ChannelCommitment` on a
   reorg (contrast with the blind `Claimed`).
