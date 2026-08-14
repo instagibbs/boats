@@ -440,6 +440,40 @@ re-upgrade (depth ladder + pre-close depth refusal + consolidation).
 Old-branch refs: `b1a73c5e6`, `e21f5e13e`, `c265b3b01`, `d97e56ec8`,
 `487877b56`, `6c954e14f`, `7a45ac225`.
 
+**Addendum (2026-08-09) — the payments slot and its accumulated debts.**
+Payments were descoped from the client MR as shipped (both sides refuse
+HTLCs; the client MR delivered its stages 1, 2, 4, 5 — LDK embedding,
+open, exit, movements — without stage 3). The payments work must be
+re-slotted when its design note is cut, and note the ordering
+constraint: MR-4's composition e2e (open → pay → downgrade →
+re-upgrade) presupposes it. Beyond the original stage-3 list (floor
+enforcement, received-HTLC acceptance incl. keysend, per-HTLC
+scheduling, the A→captaind→B e2e), the exit and coverage arcs
+accumulated debts that come due in the same slot:
+
+- **Terminal accounting generalization**: an output-specific obligation
+  count replacing the single-output floor (`expected.max(1)`), and
+  node-owned confirmation delivery with a durable drain acknowledgement
+  (the general fix for the event-persistence races the ledger + floor
+  close today under the one-output invariant).
+- **On-chain HTLC resolution**: the preimage scrape is stock LDK
+  (`is_resolving_htlc_output` parses claim witnesses inside
+  `transactions_confirmed`), but it only sees what the client feeds.
+  Needed: (a) a general watched-output confirmed-spend scanner — today
+  the exit feeds only self-originated transactions, sound solely
+  because no third-party spend can exist without HTLCs; (b) a real
+  relay + fee path for OUR HTLC-success/timeout claims — the
+  capture-only broadcaster never relays and the `BumpTransaction`
+  HTLC-resolution arm fails closed by design; (c) an e2e proving the
+  backwards claim: counterparty claims on-chain with the preimage →
+  feed → scrape → upstream/inbound HTLC claimed.
+- **`Theirs` sweeps become reachable** (StaticPayment on a counterparty
+  commitment) once a counterparty commitment can reach the chain; the
+  enum and sweep machinery support them, unexercised today.
+- The **amount-keyed expectation ledger** assumes one client output per
+  commitment; with HTLC outputs the (channel, amount) identity breaks
+  and the ledger needs the same output-specific rework as the floor.
+
 **MR-5 — surface + hardening.**
 REST `/channels` (+ openapi.json + bark-rest-client regeneration), bark-json
 DTOs, CLI subcommands, barkd integration; consolidated adversarial sweep via
