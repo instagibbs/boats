@@ -161,3 +161,23 @@ compiles.
   monitor-nudge → commitment composition, none for the zero-user close
   (unreachable without payments in stage 1); an adoption error leaves
   no durable child (evicted) and the next tick escalates.
+
+## Follow-up fold (2026-08-25, from the surface-work design review)
+
+Two shipped-code P1s found while reviewing the NEXT MR's design note
+were folded into this commit (Greg's call — the branch had just been
+pushed and he authorized the rewrite; commit rewritten `5edf934cd` →
+`671e7d635`):
+
+1. **The exit-cancel one-way door**: `initiate_channel_exit` admits the
+   close-phase origins this commit introduced, but cancellation
+   unconditionally restored `ready` — resurrecting a channel whose LDK
+   side was irreversibly shut down (or whose fallback had won). The exit
+   now records its ORIGIN phase (`exit_origin`, folded into migration
+   47); only a `ready`-origin exit is cancelable; a recorded close
+   outcome refuses cancellation outright.
+2. **The close capture was not crash-atomic**: the broadcast queue and
+   the close-candidate capture committed in two store transactions —
+   a crash in between left `ChannelClosed` permanently unable to
+   identify its transaction (fail-closed = wedged). One transactional
+   `queue_broadcast_and_capture` replaces the pair.

@@ -204,3 +204,19 @@ channel code.
   funding value (HTLC-claim liveness over stake tightness); the
   estimator's gross-stake divergence (under-counts `uneconomic_txs`
   near the boundary; fee totals stay conservative).
+
+## Follow-up fold (2026-08-25, from the surface-work design review)
+
+Folded into this commit (rewritten `cac12a382` → `f13336286`): the
+downgrade response's REPLACEMENT children now use the same
+candidate-before-broadcast discipline as the generic manager — CAS
+install over exactly the standing child read, yield on a concurrent
+writer, CAS rollback to the standing child on rejection. Closes the
+accepted-then-crash window that left an input-locking replacement
+unnamed until the anchor-spent probe (the review's P1-3; the mirror of
+this commit's own round-7/8 work, now applied to the channels path
+too).
+
+Final rewritten stack: c3 `671e7d635`, c4 `16e7101ba`, c5 `d0b9336e4`,
+fixtures `7e6a41611`, tip `f13336286`. Tree verified byte-identical to
+the tested pre-fold state; per-commit batteries re-run at c3/c4/tip.

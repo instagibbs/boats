@@ -130,3 +130,16 @@ disconnect time).
 - **Accepted residuals**: no e2e drives a real sub-dust user share
   (unreachable without payments), the F5 own-child-skip and the rescue
   orderings are machinery-verified only.
+
+## Follow-up fold (2026-08-25, from the surface-work design review)
+
+Folded into this commit (rewritten `5872d8537` → `16e7101ba`): the
+MANUAL doors now enforce the hard fallback line on a FRESH tip exactly
+like the rungs — `close_channel` refuses before `shutdown` (P1: the
+manual API could destroy a usable channel when cooperative settlement
+was already forbidden at the PONR anyway), and `cancel_channel_exit`
+refuses inside the line (a restored channel could neither close nor
+re-enter its exit in time). Two e2e vectors added: the manual refusals
+(daemon stopped so the doors face the fresh tip themselves), and the
+close-origin exit's cancel refusal at the end of the hard-line race
+test.
