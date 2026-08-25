@@ -792,7 +792,13 @@ dust, and signing rules all unchanged — shaped by the close it settles:
     it (the remaining settlement is the unilateral fallback). This floor is
     normative, not an economic assumption — BOLT does not forbid a sub-660
     channel (minimum funding is receiver policy), so the server MUST enforce
-    it rather than assume such channels do not exist.
+    it rather than assume such channels do not exist. And because the split's
+    total `V` is the channel's capacity, fixed at open, the same bound MUST be
+    enforced at **channel-open admission** (both sides): a channel funded
+    below `2·P2TR_DUST` could close into balances with no cooperative
+    settlement — a jagged edge no one should be allowed to open onto. (That
+    today's Lightning implementations refuse such channels for their own
+    reserve reasons is an implementation coincidence, not this bound.)
 * **The server as recipient.** `pubkey(S)` makes the server's share an
   explicit VTXO the server holds as its own user — roles here are keys, not
   identities — an explicit share, where a forfeit-based settlement would pay
