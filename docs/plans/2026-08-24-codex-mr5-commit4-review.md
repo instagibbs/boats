@@ -1,6 +1,9 @@
 # Codex review: MR-5 commit 4 — "bark: the symmetric watch and the deadline rungs" (10 rounds to PASS)
 
-Commit `daa645d03` on `ark8-channels-stage1-close` (bark-stage1). Battery
+Commit `daa645d03` on `ark8-channels-stage1-close` (bark-stage1);
+rewritten 2026-08-25 to `5872d8537` — the rival probe excised in history,
+see the historical note under Key design decisions and the commit-6
+record. The final stack tree is unchanged. Battery
 at PASS: sdk channels 18/18 (incl. the cooperative deadline rung with no
 exit started, the full respond-by-exit race — server DEAD — to the
 on-chain checkpoint and the scope-ended record, the reopen ladder to the
@@ -107,10 +110,16 @@ disconnect time).
   PONR; the PONR itself re-checks a fresh tip and refuses inside the
   hard line.
 - **Outbid, never wait**: blind escalation per unaccepted attempt
-  (node-derived increment) — never gated on local conflict visibility;
-  visible rivals floor the bid; our own accepted child stands until the
+  (node-derived increment) — never gated on local conflict visibility,
+  and never priced off a conflicting package's advertised feerate
+  (attacker-controllable input); our own accepted child stands until the
   target rises; ambiguity never escalates; every non-attached child is
   evicted before the lock releases.
+  *(Historical note: as reviewed, this commit also floored the bid just
+  above a VISIBLE rival's package via `gettxspendingprevout`. Greg
+  rejected pricing off external inputs; the probe was excised from this
+  commit in the stack rewrite of 2026-08-25 — see the commit-6 record —
+  so the committed history never carries it.)*
 - **Deferred movement verdicts**: a close's movement resolves only where
   the resolution is recorded (rescue → Successful; terminal exit
   reconcilers → Failed on `exited`; `Closed` replay resolution-gated).
@@ -120,5 +129,4 @@ disconnect time).
   ends in plain Ark balance, never a stuck channel.
 - **Accepted residuals**: no e2e drives a real sub-dust user share
   (unreachable without payments), the F5 own-child-skip and the rescue
-  orderings are machinery-verified only; esplora lacks the rival-probe
-  (blind escalation still applies).
+  orderings are machinery-verified only.
