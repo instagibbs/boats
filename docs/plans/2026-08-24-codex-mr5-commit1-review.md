@@ -91,3 +91,38 @@ serves, and closing it would take exactly the durability-barrier class
 this subsystem deliberately rejects. Codex: "The residual clears the P2
 bar… The extreme scheduling requirement does not justify introducing
 the rejected durability coupling."
+
+## Post-review note: classification uniqueness (the CLN-bug question)
+
+Is the "latest closing-shaped candidate" selection unique, or can an
+adversary confuse it (cf. CLN's onchaind misclassification)? Verified
+against LDK 0.2.4 source:
+
+- The CLN bug's surface — classifying adversary-chosen CONFIRMED
+  transactions by shape — does not exist here: the candidate set is
+  exclusively our own LDK's broadcast hand-overs (the capturing
+  broadcaster is the sole writer), every candidate carries our funding
+  signature by construction, and everything that judges on-chain
+  reality elsewhere in the MR matches exact recorded txids, never
+  shapes.
+- Within our own outbox, LDK signs the funding key on exactly two
+  shapes, disjoint by construction: a commitment's input sequence and
+  locktime carry `0x80`/`0x20` top bytes (the obscured commitment
+  number fills only the low three bytes — no commitment number makes
+  them MAX/zero), while the closing is `Sequence::MAX`/`LockTime::ZERO`
+  (`chan_utils.rs` constants; both peers sign the SAME tx our LDK
+  builds, and the peer's reach — its shutdown script, the fee — touches
+  neither field). HTLC second-stage and justice transactions spend
+  commitment outputs, never the funding.
+- A "no P2A output ⇒ closing" belt was CONSIDERED AND REJECTED:
+  `option_shutdown_anysegwit` makes the P2A script a legal shutdown
+  script, so a malicious peer could put a P2A output inside a
+  legitimate closing and wedge such a rule — the exact peer-controlled
+  failure mode the zero-output tolerance avoids. (A peer paying its own
+  balance to anyone-can-spend is self-harm, not our loss.)
+  Sequence/locktime are precisely the fields a peer cannot reach.
+- Either hypothetical misclassification direction is money-safe
+  regardless: balances always come from the EVENT (the signed channel
+  state), never the classified bytes, and downstream consumers match
+  exact scripts (a commitment's CSV script never matches the wallet's
+  shutdown P2WPKH — "nothing of ours", never a wrong claim).
