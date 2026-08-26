@@ -108,13 +108,42 @@ verbatim. The client fee estimator learns real targets (it currently
 flattens all of them — sound only while nothing is time-sensitive).
 Relay path for these claims included.
 
+> **c3 AMENDED 2026-08-26 (Greg): the durable-job design above is
+> SUPERSEDED by the trust-LDK design.** Eight implementation-review
+> rounds showed the durable ledger re-implementing mempool RBF
+> arbitration beside LDK's own claim state machine, sprouting corners
+> faster than they closed. Ratified replacement: the ChannelMonitor is
+> the durable claim state (it regenerates events with fresh
+> descriptors/targets every block until the chain settles the claim);
+> mempools arbitrate between attempts; bark keeps NO attempt ledger,
+> relay loop or durable selections — each event is built, registered
+> with the wallet, broadcast and forgotten. What bark keeps is policy:
+> the budget (contribution ≤ claimed; actual fee + sweep reserve ≤
+> claimed), the LDK-mirror selection arithmetic, in-memory
+> run-lifetime coin locks + our-txid tracking (so bumps re-spend their
+> own coins and user payments are never reclassified), and ONE durable
+> table — the blocked operator marker. The estimator work stands as
+> written. Full rationale, LDK/BDK citations and both review arcs:
+> `2026-08-26-codex-mr6-commit3-review.md`. The close-side asymmetry is
+> deliberate: commitments/anchors stay on bark's exit CPFP machinery
+> (they live inside VTXO exit chains LDK cannot fee-manage).
+
 **c4 — payment state + policy, still refusing payments.**
 The durable payment journal keyed by `PaymentId`/idempotency key
 (hash, direction, msat amounts/fees, invoice/keysend data,
 preimage/secret, state, movement id); event handling commits journal +
 ledger effects BEFORE event acknowledgement; `Sent` dominates a late
 `Failed`; restart resumes by payment id. Movements gain send/receive
-kinds with exact msat metadata. Embedded-node invoice/pay/keysend
+kinds with exact msat metadata.
+
+> **c4 shaping note (2026-08-26, following the c3 trust ratification):
+> lean on LDK's payment idempotence before adding bark machinery.**
+> `send_payment` with a caller-chosen deterministic `PaymentId` refuses
+> duplicates (`DuplicatePayment`), so a crash-replayed send command is
+> safe without a separate command outbox — derive the PaymentId, replay
+> the command on restart, let LDK dedup. The journal carries what is
+> genuinely bark's: msat movements for the balance predicate and F*
+> accounting, not a shadow of LDK's payment state machine. Embedded-node invoice/pay/keysend
 library APIs (route hints supply captaind→B, the sender prepends its
 own channel — no gossip; keysend via an intra-ark route descriptor).
 The uniform-F profile persisted per server channel; the cap-profile
