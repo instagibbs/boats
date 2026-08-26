@@ -143,7 +143,19 @@ kinds with exact msat metadata.
 > safe without a separate command outbox — derive the PaymentId, replay
 > the command on restart, let LDK dedup. The journal carries what is
 > genuinely bark's: msat movements for the balance predicate and F*
-> accounting, not a shadow of LDK's payment state machine. Embedded-node invoice/pay/keysend
+> accounting, not a shadow of LDK's payment state machine.
+>
+> **AMENDED at c4 convergence (2026-08-26, Greg's call, codex r9): no
+> automatic re-issue at all.** The replay-on-restart clause above was
+> implemented and then deleted — four patches in, codex kept finding
+> re-issue lifecycle gaps (the same smell as c3's durable ledger). The
+> shipped posture: at node construction (quiescent), a pending send row
+> whose id LDK does not track is marked FAILED — the crash cut the send
+> before it entered LDK — and the user retries explicitly (failed rows
+> are replaceable in place, refused while LDK still tracks the id). A
+> wallet must not silently pay an invoice minutes after a restart, and
+> everything LDK tracks is LDK's: its events settle the journal. See
+> the commit-4 review record for the full convergence. Embedded-node invoice/pay/keysend
 library APIs (route hints supply captaind→B, the sender prepends its
 own channel — no gossip; keysend via an intra-ark route descriptor).
 The uniform-F profile persisted per server channel; the cap-profile
@@ -277,7 +289,9 @@ claimability), the config grace fallback, the async manager write, and
 6. **The operator-guide residual statement is IN c5** (the "explicitly
    out" line below is corrected — only the FULL operator guide is
    MR-7).
-7. **c6 gains the command-side crash cuts**: outbox-durable/before-send,
+7. **c6 gains the command-side crash cuts** (per the c4 amendment:
+   journal-before-send, crash-cut sends failing at construction,
+   failed-row replacement):
    monitor-durable/manager-old, invoice-durable/before-return, plus
    duplicate-payment-hash vectors; and the floor boundary is tested at
    exactly `F` (accepted) vs `F − 1` (failed), the defense-in-depth
