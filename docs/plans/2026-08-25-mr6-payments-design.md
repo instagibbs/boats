@@ -155,7 +155,17 @@ kinds with exact msat metadata.
 > are replaceable in place, refused while LDK still tracks the id). A
 > wallet must not silently pay an invoice minutes after a restart, and
 > everything LDK tracks is LDK's: its events settle the journal. See
-> the commit-4 review record for the full convergence. Embedded-node invoice/pay/keysend
+> the commit-4 review record for the full convergence.
+>
+> **AMENDED at c5 convergence (2026-08-27, codex r3): STRANDED, not
+> failed.** A pending send untracked by LDK at restart can also be a
+> send that fully settled and was revoked away before the manager
+> persisted (LDK's reload reconstructs only HTLCs still in commitments)
+> — marking it failed invited a double-pay on retry. Such rows now
+> STRAND: non-replaceable, no movement, surfaced via the read-only
+> journal listing, resolved by the user with the recipient — or by an
+> authoritative terminal event (PaymentFailed → failed/replaceable;
+> sent dominates). See the commit-5 review record. Embedded-node invoice/pay/keysend
 library APIs (route hints supply captaind→B, the sender prepends its
 own channel — no gossip; keysend via an intra-ark route descriptor).
 The uniform-F profile persisted per server channel; the cap-profile
@@ -173,6 +183,20 @@ deadline rung
 (`remaining ≤ F`, before cooperative rungs, in every pre-PONR state;
 persists its cause through the exit-origin machinery); forwarding
 config from the uniform F profile. Only then does acceptance flip.
+
+> **c5 shipped shape (2026-08-27, PASSED codex round 15)** — the
+> contract above plus the convergence's structural additions: the
+> claim seam's FRESHNESS LEASE (quiescent-watch-pass-granted,
+> tip-fetch-dated, registry-generation-bound, dual-clock-stamped;
+> stale ⇒ fail backwards, never replay); the CLAIM-BINDING CAS
+> (pending→claiming keyed by LDK payment id, both journals); the
+> peer-close forced-exit level trigger with the cooperative-completion
+> probe (closing candidates refute lying closure reasons); QUARANTINE
+> (forwarding off + offender claims refused) instead of startup
+> refusal for nonconforming channels; `registered` as a fully
+> protected, exit-capable, claim-admissible state; the even-TLV
+> screen; manual-sync + channels refusing to start. Full trail in the
+> commit-5 review record.
 
 **c6 — the payments e2e.**
 B→captaind collect; A→captaind→B; below-floor rejection (decoded-invoice
