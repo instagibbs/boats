@@ -1254,8 +1254,9 @@ pair, bits `400/401` (the reference's `ark_channel` feature): peers advertise
 the *optional* bit `401` in `init` (and `node_announcement`) — alongside the
 optional `zero_fee_commitments` bit, so the dependency bundle is recognizable —
 and at channel open the *required* bit `400` is the one set in the
-`channel_type`, alongside the `static_remote_key` and `zero_fee_commitments`
-bits it implies. The pair is experimental — chosen clear of allocated BOLT
+`channel_type`, alongside the `zero_fee_commitments` and `option_scid_alias`
+bits it implies. (It does NOT imply `static_remote_key`: the zero-fee
+commitment type does not carry that bit, unlike the legacy anchor types.) The pair is experimental — chosen clear of allocated BOLT
 bits — so the exact number is subject to change if the type is ever
 standardized. A server operating this extension MUST refuse to open a channel
 of any other type — the extension's instance of the core's designated-type
@@ -2204,8 +2205,13 @@ The peers of one Ark service run the same profile, and the layering contract
 The core lifecycle with no extensions. Its designations, and the obligations
 that stand in for the extensions' protections:
 
-* **Channel type.** The designated type is `zero_fee_commitments` (with
-  `static_remote_key`): v3/TRUC commitments and the single shared P2A anchor
+* **Channel type.** The designated type is `zero_fee_commitments` with
+  `option_scid_alias` — and NOT `static_remote_key`, which the zero-fee
+  commitment type does not carry (only the legacy anchor types do).
+  `option_scid_alias` is required because no wire reference may ride a
+  synthesized SCID, and since only the funder can put the bit in the
+  proposed type, the acceptor requiring it is what enforces the funder's
+  obligation. v3/TRUC commitments and the single shared P2A anchor
   put the whole force-close family under one fee model (CPFP over P2A,
   ARK #6), and no `update_fee` runs against a funding that cannot be
   re-signed. The server MUST refuse any other type ("Channel setup").
