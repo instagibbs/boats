@@ -26,8 +26,9 @@ the bridge transaction"). The two channel parties are the user `A` and the
 server `S`; there is no third party.
 
 Because a channel VTXO's cooperative key is the same `musig(A, S)` as a `pubkey`
-VTXO, every *cooperative* Ark operation on it — issuing it (open), giving it up
-(forfeit), refreshing it (round), and closing it (downgrade) — is the
+VTXO, every *cooperative* Ark operation on it — issuing it (the open's
+upgrade), closing it (the downgrade split), and, with the refresh extension,
+giving it up (forfeit) and refreshing it (round) — is the
 corresponding standard Ark flow, unchanged. A channel VTXO differs from a
 `pubkey` VTXO in only two ways:
 
@@ -47,14 +48,14 @@ The lifecycle:
   board (ARK #3) included ("Open by upgrade").
 * **Operate** ("Operation"): payments flow over the channel per BOLT; the
   funding VTXO sits unchanged.
-* **Refresh** ("Refresh"): before expiry, a round (ARK #4) forfeits the
+* **Refresh** ("Refresh", an extension): before expiry, a round (ARK #4) forfeits the
   channel VTXO and issues a fresh one, resetting expiry and exit depth while
   preserving the channel balance.
 * **Downgrade** ("Downgrade: close into Ark balance"): a cooperative close
   settled *off-chain* — the same BOLT close fixes the final balances, then an
   out-of-round split (ARK #5) spends the channel VTXO into plain `pubkey`
   VTXOs matching them, leaving the user's balance in the Ark.
-* **Unilateral exit / force-close** ("Unilateral exit"): the user recovers its
+* **Unilateral exit / force-close** ("Unilateral exit / force-close"): the user recovers its
   funds on-chain with no server cooperation.
 
 Open, refresh, and downgrade reuse the Ark RPCs and ceremonies of ARK #5
@@ -71,6 +72,24 @@ optional server liquidity bound (see "Refresh" and "Compatibility"). The
 downgrade split adds no fields at all — it is a plain ARK #5 request,
 distinguished only by its input's policy.
 
+### Layers
+
+This document is layered. The **core lifecycle** — the channel VTXO and its
+bridge, open by upgrade, operation, the cooperative close and its downgrade
+settlement, unilateral exit, and expiry — reads contiguously from here and
+is self-contained: together with an operating profile ("Implementation
+profiles") it fully specifies a
+working channel system on an unmodified Lightning implementation that
+exposes manual (application-supplied) funding and application-fed chain
+hooks. Two **extension**
+sections follow the core, and each builds only on what precedes it: "The
+Ark channel type" (a dedicated channel type whose party-keyed HTLC claim
+delays make forwarding safe against expired-HTLC races) and "Refresh" with "The
+teleport protocol" (in-place renewal of the channel's backing VTXO, lifting
+the core's expiry treadmill). A core-only implementation is complete and
+interoperates with itself; each extension adds negotiated capability on
+top.
+
 ### Actors and keys
 
 At the Ark layer the channel reuses the keys of ARK #0 and introduces none.
@@ -81,7 +100,7 @@ At the Ark layer the channel reuses the keys of ARK #0 and introduces none.
 * `S` — the server pubkey.
 
 The channel VTXO's cooperative 2-of-2 is `musig(A, S)`; it signs the bridge
-transaction and every forfeit and refresh, exactly as for any VTXO.
+transaction and every cooperative spend of the VTXO, exactly as for any VTXO.
 The `channel-funding` policy stores only `user_pubkey` (= `A`); the server side
 is `S`, the VTXO's `server_pubkey`, exactly as `pubkey` derives it (ARK #2).
 
@@ -103,11 +122,10 @@ Beyond the VTXO trust model (ARK #0), a channel adds:
   the VTXO's off-chain exit chain and are never broadcast unless the channel
   force-closes. The Lightning stack nonetheless needs the funding confirmed to
   operate the channel. *Virtual funding* means treating the funding output as
-  confirmed at the point the VTXO's on-chain chain anchor (ARK #2) confirms — the
-  round transaction (the tree root) for a channel established by a refresh,
-  or the input VTXO's existing anchor (its board or round transaction) —
-  already confirmed before the open began — for a channel opened by upgrade
-  ("Open by upgrade"). Once that anchor has
+  confirmed at the point the VTXO's on-chain chain anchor (ARK #2) confirms —
+  for a channel opened by upgrade ("Open by upgrade"), the input VTXO's
+  existing anchor (its board or round transaction), already confirmed before
+  the open began. Once that anchor has
   confirmed, the user holds a fully exitable VTXO whose bridge actualizes the
   funding output on-chain; treating it as confirmed is therefore sound. Virtual
   funding is a logical confirmation tied to that anchor, and it changes nothing
@@ -124,20 +142,44 @@ Beyond the VTXO trust model (ARK #0), a channel adds:
   NOT accept or forward HTLCs on a channel until it again holds a coherent
   chain view and funding status for it, and if it cannot recover them it MUST
   leave the channel fail-closed rather than rebuild a fresh state and continue.
+
+  A confirmed funding position — block height, transaction index, output
+  index — is how BOLT #7 names a channel (the *short channel id*), and a
+  virtual funding has none: the bridge transaction sits in no block. The
+  channel therefore MUST NOT be announced — a `channel_announcement` would
+  name a position the network would rightly fail to verify against the
+  chain — and every protocol-visible reference to the channel (invoice
+  route hints, forwarding) rides the `option_scid_alias` mechanism, exactly
+  as zero-conf channels already do. An implementation that models the
+  funding as confirmed will synthesize a position internally; the
+  synthesized position carries no protocol meaning, and the peers need not
+  agree on it. What an implementation MUST guarantee is local hygiene: the
+  position MUST be unique among all channels the node operates — channels
+  backed by the same anchor share the anchor's height by construction, so
+  the transaction index is what distinguishes them — and MUST be stable for
+  as long as the funding scope it names exists, across restarts (a later
+  funding scope of the same channel is a new outpoint and receives its own
+  position). Deriving the transaction index from the bridge txid — within
+  BOLT #7's 3-byte index space, avoiding the coinbase position — gives
+  restart stability for free and, incidentally, agreement between peers;
+  such a derivation is only probabilistically unique, so a node MUST still
+  detect collisions among its own channels and persist the resolution it
+  applies. The synthesized height is the anchor's actual height, per the
+  rule above.
 * **Expiry is a deadline.** Like every VTXO, a channel VTXO has an
   `expiry_height` after which the server may sweep its backing funds. The user
-  MUST refresh or close the channel before expiry — with enough margin to confirm
+  MUST close the channel or exit before expiry — with enough margin to confirm
   the bridge first, and stopping new HTLCs as the deadline nears, since a forced
   force-close must still resolve any in-flight HTLC on-chain in time (see "The
-  refresh / force-close deadline"). A channel left un-refreshed past expiry can lose its
+  force-close deadline"). A channel carried past expiry can lose its
   funds to the server's sweep.
-* **Liveness for cooperation.** Refresh and cooperative close require a
+* **Liveness for cooperation.** The cooperative close requires a
   responsive server; unilateral exit is always available without one.
 * **On-chain fee reserve for exit.** Unilateral exit is a longer 0-fee TRUC chain
   than a plain VTXO exit — the genesis levels, then the bridge, the commitment, and
   any HTLC second-stage transactions — each CPFP-bumped at broadcast (ARK #6). The
   user therefore needs spendable on-chain funds to fee-bump that chain within the
-  force-close deadline (see "The refresh / force-close deadline"); a user with no
+  force-close deadline (see "The force-close deadline"); a user with no
   fee reserve can miss the deadline and lose the channel to the expiry sweep. This
   is the ordinary emergency-exit fee assumption (ARK #0), enlarged by the extra hops
   a channel exit adds.
@@ -149,7 +191,7 @@ and the **bridge transaction** that spends it. The bridge's output is the
 Lightning funding output.
 
 ```
-   channel VTXO output: cosign taproot (musig(A,S), S, expiry)
+   channel VTXO output: taproot(musig(A,S); {expiry-sweep leaf, domain marker})
         │  (bridge transaction, presigned, held off-chain)
         ▼
    bridge tx ── out0: funding output = P2WSH 2-of-2 (BOLT-3 funding keys)
@@ -162,17 +204,30 @@ Lightning funding output.
 ### The channel VTXO output
 
 A channel VTXO's output carries the `channel-funding` policy (ARK #2, type byte
-`0x08`):
+`0x0c`):
 
 * internal key `musig(A, S)` — the cooperative 2-of-2 (`A` = the policy's
   `user_pubkey`, `S` = the VTXO's `server_pubkey`; ARK #2). This is the path the
-  bridge transaction spends, and the path used to forfeit, refresh, or split
-  the VTXO;
-* a single leaf, timelock-sign `(expiry_height, S)` — the server's post-expiry
-  sweep.
+  bridge transaction spends, and the path every cooperative spend of the
+  VTXO uses;
+* the server's post-expiry sweep leaf, timelock-sign `(expiry_height, S)`;
+* a constant, unspendable **domain-marker leaf** with no spending semantics —
+  `OP_RETURN <C>` at leaf version `0xc0`, where
+  `C = tagged_hash("ark/channel-funding-domain-v1", "")`; the exact script
+  bytes and constant value are pinned in the policy's ARK #2 definition.
+  It exists only so that a
+  `channel-funding` output key is distinct from a board funding output's:
+  a distinct VTXO type carries a distinct, non-colliding output
+  construction, so a cosignature produced over one type's output can never
+  be valid for another's. It is never revealed on-chain (unspendable; only
+  its leaf hash contributes to the taproot).
 
-This is the **cosign taproot** `(musig(A, S), S, expiry_height)` of ARK #2 — a
-VTXO like any other. Two properties matter for channels:
+There is no user VTXO-level exit leaf: a channel VTXO's unilateral-exit
+delay rides on the bridge's input `nSequence`, not on a VTXO leaf.
+
+This is ARK #2's cosign taproot `(musig(A, S), S, expiry_height)` **plus the
+domain-marker leaf** — a VTXO like any other. Two properties matter for
+channels:
 
 * **No user exit leaf.** A `pubkey` output carries a `delayed-sign(exit_delta,
   A)` leaf for the user's unilateral claim; a `channel-funding` output does not.
@@ -210,15 +265,14 @@ transaction (ARK #6): `nVersion = 3` (TRUC), `nLockTime = 0`, 0-fee.
 
 The bridge carries the channel's **unilateral-exit delay**. Because it is
 presigned with `nSequence = pinned_exit_delta` and is the only unilateral on-chain spend
-of the VTXO's key path (forfeit / refresh / split are cooperative and
-off-chain), the delay is enforced by the bridge alone — no script on the VTXO
+of the VTXO's key path (every cooperative spend of it happens off-chain),
+the delay is enforced by the bridge alone — no script on the VTXO
 output, and no CSV on the commitment input. After a unilateral exit the bridge
 confirms only `pinned_exit_delta` blocks after the channel VTXO output confirms — the
 *same* delay a `pubkey` exit waits (ARK #6) — and the commitment then confirms
 immediately. The delay MUST equal the channel's pinned `exit_delta` — fixed at
 open from `vtxo_exit_delta` (ARK #0) and reused unchanged for the life of the
-channel, including by every refresh bridge (see "The Ark channel type") — so it
-agrees by construction.
+channel — so it agrees by construction.
 
 Both parties MUST construct the identical bridge — same funding output, P2A
 anchor, and `nSequence` — or the funding outpoints differ and the channel cannot
@@ -226,226 +280,17 @@ operate; the bridge cosign reconstructs it canonically (see "Messages"). The
 bridge is the **last transaction of the channel VTXO's exit chain**: exiting a
 channel VTXO means broadcasting its genesis chain root-first (ARK #6) until the
 VTXO output confirms, then the bridge, then the commitment (see "Unilateral
-exit"). The client holds the fully signed bridge — its unilateral exit (the genesis chain,
+exit / force-close"). The client holds the fully signed bridge — its unilateral exit (the genesis chain,
 then the bridge, then the commitment) depends on it. The server MAY retain it
 too, but need not (the reference does not): its recourse to a channel left
 stranded by an absent client is the expiry sweep of the channel VTXO output (see
 "Server recourse after expiry"), which needs neither the bridge nor the
 commitment. A server that does retain the bridge can force-close before expiry
 by broadcasting bridge + commitment (e.g. to reclaim liquidity from an idle
-channel early) — an optimization, not a requirement.
-
-## The Ark channel type
-
-A channel on Ark is not a vanilla BOLT channel: the parties MUST negotiate a
-dedicated **Ark channel type**. It is not a registered BOLT feature — Ark-aware
-peers agree on it out of band — but it is negotiated as an experimental feature
-pair, bits `400/401` (the reference's `ark_channel` feature): peers advertise
-the *optional* bit `401` in `init` (and `node_announcement`) — alongside the
-optional `zero_fee_commitments` bit, so the dependency bundle is recognizable —
-and at channel open the *required* bit `400` is the one set in the
-`channel_type`, alongside the `static_remote_key` and `zero_fee_commitments`
-bits it implies. The pair is experimental — chosen clear of allocated BOLT
-bits — so the exact number is subject to change if the type is ever
-standardized. The server MUST refuse to open a channel of any other type
-(channel support on the Ark service is advertised by the `supports_channels`
-flag, see "Compatibility").
-
-The Ark channel type is a BOLT channel using the `zero_fee_commitments` option
-(BOLT #9 feature 40/41, specified in BOLT #3), with the Ark-specific deviations
-below. From `zero_fee_commitments` it takes — as plain BOLT, not Ark changes —
-version-3 (TRUC) commitment *and* HTLC transactions and a single `shared_anchor`
-pay-to-anchor output `OP_1 <0x4e73>` in place of any commitment fee, fee-bumped
-by CPFP at broadcast (anchor value per BOLT: `min(240 sat, the commitment's
-residual)`, any excess becoming on-chain fee). That is the same P2A and CPFP
-discipline the Ark exit transactions use (ARK #6). Everything else not listed
-below — the `to_local` / `to_remote` outputs, revocation and per-commitment key
-derivation, the base HTLC scripts, and HTLC resolution — is likewise unchanged
-BOLT and is referenced, not restated.
-
-An Ark channel is interoperable only if both peers reproduce the deviations
-below identically: a mismatch makes the exchanged signatures fail to verify and
-aborts the channel. The funding output is a stock BOLT-3 P2WSH 2-of-2 produced by
-the bridge transaction (see "The channel VTXO and the bridge transaction"), so it
-is **not** a deviation — the channel's two BOLT-3 funding pubkeys are ordinary
-Lightning keys (Actors and keys), and the commitment is an unmodified
-`zero_fee_commitments` commitment (its obscured commitment number rides in
-`nLockTime`/`nSequence` as in BOLT-3 — the bridge, not the commitment, carries
-the exit-delay CSV). The Ark-specific deviations are:
-
-* **HTLC success-path CSV.** Each HTLC output's preimage-claim (success) branch
-  gains an extra `<exit_delta> OP_CSV OP_DROP`; the timeout branch carries no
-  extra CSV. Every spend of the success branch — the presigned second-stage
-  HTLC-success transaction and a direct preimage claim of the counterparty's
-  commitment output alike — MUST set `nSequence` to at least `exit_delta` or it
-  is consensus-invalid; the second-stage HTLC-success transaction is presigned
-  with `nSequence = exit_delta`. The second-stage HTLC-timeout transaction is
-  presigned with the baseline `nSequence` (0) — **not** `exit_delta`. The
-  asymmetry is deliberate and normative: these are v3 transactions, so any
-  `nSequence` below `0x80000000` is a real BIP-68 relative timelock, and
-  presigning the timeout template at `exit_delta` would delay the offerer's
-  own timeout claim by the very delta that exists to protect it, turning its
-  head start into a fee-race tie (and re-opening the replacement-cycling
-  window the head start closes). The HTLC signatures commit to `nSequence`,
-  so peers that disagree on either template simply fail to verify each
-  other's signatures. With the asymmetry, a timeout claim strictly leads a
-  preimage claim by `exit_delta` on whichever commitment confirms — the
-  direct timeout claim of a counterparty commitment carries no relative
-  delay either. This is what guarantees that an HTLC whose absolute CLTV
-  expired while the slow exit chain was confirming resolves
-  deterministically to the timeout side rather than racing, so the offerer
-  never depends on out-racing (or extracting a preimage from) a competing
-  claim. This success CSV MUST equal the channel's pinned `exit_delta` (see
-  "`exit_delta` is pinned at open" below); both peers use that fixed value
-  rather than re-deriving it per update or negotiating it. BOLT-3 has no
-  success-branch CSV. This CSV is a required construction parameter of the Ark
-  channel type, not an optional feature or a defaultable setting: a node MUST
-  NOT advertise, accept, or construct the Ark channel type unless a nonzero
-  success CSV equal to the pinned `exit_delta` is in force on every HTLC
-  success branch, and it MUST validate that binding before it advertises the
-  type or cosigns the open. Both the bridge `nSequence` and the success CSV
-  MUST derive from the single pinned value (see "`exit_delta` is pinned at
-  open" below).
-
-  The same invariant binds a channel restored from persistence: a stored scope
-  whose success CSV is absent, zero, or too large for its CLTV floor MUST NOT
-  be resumed or offered new HTLCs — and the CSV cannot be repaired from current
-  configuration, since the commitment scripts it appears in are already signed.
-  Force-closing the scope (or keeping it fail-closed) is the only safe
-  disposition.
-
-* **HTLC CLTV budget.** A receiver MUST reject an incoming HTLC whose CLTV
-  budget is too small, and the channel's minimum `cltv_expiry_delta` MUST be at
-  least `2 * pinned_exit_delta + channel_max_vtxo_exit_depth +
-  cltv_safety_margin`. Resolving an HTLC on-chain crosses **two**
-  `pinned_exit_delta` delays in series: first to get
-  the **commitment** confirmed — force-closing *through* the VTXO exit takes up to
-  `channel_max_vtxo_exit_depth` genesis levels (ARK #0) plus the bridge, whose
-  input is time-locked `pinned_exit_delta` — and then, on the confirmed
-  commitment, the **HTLC success-path CSV** (above) delays the preimage claim a
-  further `pinned_exit_delta`. Both must complete before the HTLC's absolute CLTV (after
-  which the offerer's timeout path opens), which is why `pinned_exit_delta` appears
-  twice. The serial chain a force-close climbs before the preimage claim is valid:
-
-  ```
-     force-close begins
-          │  ≤ channel_max_vtxo_exit_depth genesis levels (each ~1 block)
-          ▼
-     channel VTXO output on-chain
-          │  pinned_exit_delta    (bridge input nSequence CSV)
-          ▼
-     bridge confirmed → commitment confirms (no extra delay of its own)
-          │  pinned_exit_delta    (HTLC success-path CSV)
-          ▼
-     HTLC-success spend valid  ── must land before the HTLC's absolute CLTV ──
-  ```
-
-  Worked example (defaults `pinned_exit_delta = 144`,
-  `channel_max_vtxo_exit_depth = 16`): the
-  floor is `2·144 + 16 + cltv_safety_margin = 304 + cltv_safety_margin` blocks
-  (~2.1 days before the buffer; the reference sizes the margin at 18 blocks,
-  for a 322-block floor). The common error is to budget only the success-path
-  CSV — `1·pinned_exit_delta + cltv_safety_margin` — and fold the rest into the margin;
-  that under-counts by a whole `pinned_exit_delta + channel_max_vtxo_exit_depth` and lets the
-  offerer's timeout win the on-chain race. `cltv_safety_margin` is the ordinary
-  Lightning confirmation buffer, but
-  for an Ark channel it MUST be sized larger: it absorbs confirmation variance
-  across the **whole serial chain** a force-close climbs — up to
-  `channel_max_vtxo_exit_depth` genesis levels, then the bridge, the commitment, and the
-  success-path claim — each budgeted at a single block in the floor but any of
-  which can run longer under fee pressure (the non-Ark race is only
-  commitment-then-claim; refreshing often to keep exit chains shallow keeps the
-  needed margin realistic). The exit-derived terms come from
-  the channel's pinned `exit_delta` (below) and from its pinned
-  `channel_max_vtxo_exit_depth`, so both peers compute the same floor given the
-  same buffer; each enforces it from its own configuration, not on the wire.
-  Because these values are pinned per channel ("`exit_delta` is pinned at
-  open"), the floor is a **per-channel** quantity, and a refresh — which reuses
-  the pinned timing profile — does not move it. A receiver that commits to a
-  single CLTV floor not bound to
-  one channel — for example the `min_final_cltv_expiry_delta` of a BOLT-11 invoice
-  payable over any of its channels — MUST therefore advertise the **maximum**
-  floor across the channels it could receive on, so the budget holds whichever
-  channel the payment lands on (the value is fixed when the invoice is issued). A
-  payment that carries *no* receiver-committed CLTV floor — a **spontaneous
-  (keysend) payment**, which has no invoice `min_final_cltv_expiry_delta` — cannot
-  be budgeted this way at all, so a receiver MUST reject a keysend HTLC on an Ark
-  channel (the reference fails it back). Keysend is therefore **unsupported** on
-  Ark channels until a per-channel floor can be enforced for it.
-  `channel_max_vtxo_exit_depth`
-  is also the upper bound the budget assumes on the **channel VTXO's own** exit
-  depth — the number of genesis levels a force-close must climb: a channel VTXO
-  is only ever a board leaf (depth 1), an upgrade output ("Open by upgrade"),
-  or a refresh round leaf, and the client MUST refuse a refresh whose issued
-  leaf would exceed it (see "Refresh") — or an upgrade whose resulting depth
-  would ("Open by upgrade") — since a deeper exit chain would overrun the
-  budget.
-
-  Every timing-profile calculation MUST use checked arithmetic in a type wider
-  than its encoded fields. BOLT's channel `cltv_expiry_delta` is a `u16`, so the
-  complete floor
-  `2 * pinned_exit_delta + channel_max_vtxo_exit_depth + cltv_safety_margin`
-  MUST be no greater than `65535`, and a node MUST NOT advertise, open, or
-  accept an Ark channel whose complete floor is unrepresentable or whose
-  configured CLTV floor is smaller. An implementation that enforces the floor's
-  terms in separate layers MUST still check the complete floor before the
-  channel is enabled. Saturating an overflowing floor is non-conforming: it
-  silently admits HTLCs with less time than the on-chain path requires.
-
-* **Virtual funding.** The channel uses manual funding at zero confirmation
-  depth — it becomes usable without its funding (bridge) transaction appearing
-  on-chain (see "Trust assumptions").
-
-**`exit_delta` is pinned at open.** A channel's `exit_delta` — the value on the
-bridge input's `nSequence`, in the HTLC success-path CSV, and in the CLTV budget
-above — is fixed **once, at open** — the input VTXO's decoded `exit_delta`
-("Open by upgrade") — and is
-thereafter a fixed parameter of the channel. Both parties MUST store it (with the
-channel's other parameters, keyed by `channel_id`) and use the stored value for
-every later commitment and for the bridge of every refresh; neither re-reads
-`vtxo_exit_delta` from ark info for an existing channel. No wire field carries
-it. Cross-peer agreement is enforced at open by the **bridge cosign**: the
-`musig(A, S)` key-path sighash commits the bridge input's `nSequence`, so peers
-holding different values fail to verify each other's partial signatures and the
-open aborts with nothing on-chain. The **HTLC success-path CSV is not what
-catches a disagreement**: the initial commitment carries no HTLC outputs, so
-nothing signed at establishment commits to the success CSV, and a divergence
-confined to it — one peer's success CSV drifting from its own bridge
-`nSequence` — stays hidden through a successful open and surfaces only at the
-first HTLC's commitment exchange, whose signatures fail to validate and
-force-close an established channel *after* the board transaction confirmed
-(the point of no return). An implementation MUST therefore derive the success
-CSV and the bridge `nSequence` from the single pinned value rather than
-configuring them independently: the protocol re-verifies the bridge copy at
-every cosign, but a split between a peer's own two copies is caught by nothing
-until that first-HTLC force-close. A
-refresh MUST build the new bridge at the pinned value, and the server,
-reconstructing that bridge from `channel_id`, MUST use the channel's stored
-`exit_delta` rather than its current ark-info value; if the server's
-`vtxo_exit_delta` has since changed and it will not cosign at the pinned value,
-the refresh fails and the channel must be closed and reopened.
-
-**The channel timing profile is pinned at open.** At open both parties MUST
-record the pair `(pinned_exit_delta, channel_max_vtxo_exit_depth)`, where
-`channel_max_vtxo_exit_depth` is the maximum VTXO exit depth on which this
-channel's CLTV floor was based. The channel's CLTV base is
-`2 * pinned_exit_delta + channel_max_vtxo_exit_depth`; a receiver MUST retain
-the floor committed in each outstanding invoice and MUST NOT later apply a
-smaller floor. Ark info is an admission policy for new channels, not a source of
-timing parameters for an existing channel.
-
-Every timing decision for a backing scope binds to values fixed when that scope
-was issued: the absolute `expiry_height` and actual exit depth decoded from the
-VTXO itself, and the channel's pinned timing profile. A refresh is valid only if
-the decoded new VTXO has `exit_delta == pinned_exit_delta` and actual exit depth
-`<= channel_max_vtxo_exit_depth`; a configuration change cannot raise either
-bound for an existing channel. HTLC admission, invoice validation, the
-stop-forwarding threshold, refresh scheduling, and force-close scheduling MUST
-use those scope-fixed values together with the real chain height, across
-restarts. They MUST NOT recompute expiry as anchor/root height plus a current
-`vtxo_expiry_delta`, or substitute a current ark-info exit parameter or depth
-bound. A peer unable to issue or cosign a scope meeting the stored profile MUST
-refuse refresh, leaving the client to refresh earlier or force-close.
+channel early) — an optimization, not a requirement. And if the *client*
+actualizes the funding (exit + bridge) and only then goes absent, no retained
+bridge is needed at all: the server's recourse is a standard force-close of
+the now-ordinary channel ("Server recourse after the bridge confirms").
 
 ## Channel open
 
@@ -468,7 +313,7 @@ upgrade" specifies the flow.
    upgrade transfer: ARK #5 checkpoint + arkoor level (held off-chain)
         │
         ▼
-   channel VTXO output: cosign taproot (musig(A,S), S, expiry)
+   channel VTXO output: taproot(musig(A,S); {expiry-sweep leaf, domain marker})
         │  (bridge transaction, presigned, held off-chain; nSequence = pinned_exit_delta)
         ▼
    funding output: P2WSH 2-of-2 (BOLT-3 funding keys)   ← channel's funding outpoint
@@ -479,8 +324,11 @@ upgrade" specifies the flow.
 
 ### Channel setup
 
-The parties MUST negotiate the Ark channel type (see "The Ark channel type"),
-which exchanges the two ordinary BOLT-3 funding pubkeys. With the bridge built
+The parties MUST negotiate the channel type their operating profile
+designates ("Implementation profiles"; under the type extension, the Ark
+channel type), and the server MUST refuse to open a channel of any other
+type. Establishment exchanges the two ordinary BOLT-3 funding
+pubkeys. With the bridge built
 and cosigned, its output (`bridge_txid:0`) is given to the Lightning stack as the
 funding outpoint, and the parties run Lightning channel establishment
 (referenced) to exchange signatures on the initial commitment transaction, which
@@ -507,7 +355,7 @@ completes.
    input `pubkey` VTXO output (held, off-chain)             [chain anchor: the
         │  (checkpoint tx, when used — see below)            input's, already
         ▼                                                    confirmed]
-   channel VTXO output: cosign taproot (musig(A,S), S, expiry)
+   channel VTXO output: taproot(musig(A,S); {expiry-sweep leaf, domain marker})
         │  (bridge transaction, presigned, held off-chain;
         │   nSequence = pinned_exit_delta)
         ▼
@@ -535,7 +383,7 @@ nonces and the bridge nonce. Its amount MUST equal the channel's negotiated
 funding amount — the bridge's funding output carries exactly this value, and
 the cosign verifies the equality ("Messages"). The new VTXO inherits the input's
 `expiry_height`, `server_pubkey`, `exit_delta`, and `anchor_point` (ARK #5);
-the upgrade resets nothing — the next channel refresh does, as it would anyway.
+the upgrade resets nothing.
 There is no fee: an upgrade commits no new server capital and inherits the
 scope's existing maturity, so like any arkoor transfer it is not separately
 priced.
@@ -599,13 +447,16 @@ of these:
   `channel_max_vtxo_exit_depth` being pinned at open. This tightens ARK #5,
   which bounds only the *input* (at `max_vtxo_exit_depth − 1`) and so admits
   checkpointed outputs at depth `max_vtxo_exit_depth + 1` — an overshoot that
-  would overrun the pinned CLTV budget ("The Ark channel type").
+  would overrun the CLTV floor ("The force-close deadline"). Admission
+  SHOULD go further and leave **split headroom**: a resulting depth at most
+  `channel_max_vtxo_exit_depth − 2` keeps a worst-case (checkpointed)
+  downgrade split cosignable for the channel's whole life (see the depth
+  rules under "Downgrade: close into Ark balance").
 * **Runway.** The scope inherits the input's `expiry_height`, and the
   remaining runway (`expiry_height − real chain tip`) MUST exceed the party's
-  computed complete CLTV floor
-  (`2 * pinned_exit_delta + channel_max_vtxo_exit_depth + cltv_safety_margin`):
-  below it the channel opens already inside its refresh-or-close discipline
-  ("The refresh / force-close deadline"), and below the force-close margin,
+  computed CLTV floor `F` ("The force-close deadline"):
+  below it the channel opens already inside its close-or-exit discipline
+  ("The force-close deadline"), and below the force-close margin,
   unable to beat the expiry sweep at all. The remedy is to refresh the input
   first — resetting expiry and depth — then upgrade. No far-future admission
   bound is needed: the inherited expiry was admitted when the input was
@@ -613,7 +464,7 @@ of these:
 * **Pinned parameters.** `pinned_exit_delta` is the input VTXO's decoded
   `exit_delta` — the new VTXO inherits it, so the scope invariant
   `decoded exit_delta == pinned_exit_delta` holds from birth — and the bridge
-  `nSequence` and HTLC success-path CSV derive from it exactly as at the
+  `nSequence` derives from it exactly as at the
   open. A server unwilling to operate a channel at that value MUST refuse to
   cosign; the client's remedy is refresh first.
   `channel_max_vtxo_exit_depth` is pinned from the published
@@ -648,15 +499,10 @@ Concretely — each an observable property that MUST survive a crash:
   of the input's exit chain confirming, for as long as the input's
   delayed-exit leaf is live: not merely for the scope's life, but until the
   input VTXO's output is conclusively spent on-chain (by the retained
-  transfer or a forfeit-driven actualization), or a confirmed expiry sweep
+  transfer), or a confirmed expiry sweep
   of one of its ancestors has made its creation impossible — a `pubkey`
   output carries no expiry leaf of its own (ARK #2); the sweep recourse
-  lives on its cosign-taproot ancestors. A
-  refresh does **not** end the duty — after its forfeit, the
-  forfeited upgrade output can be actualized for the forfeit claim only
-  through these same transactions, so discarding them at forfeit would let
-  the input's leaf outrace the forfeit and take the value backing the
-  replacement scope or payout. On seeing the input's chain confirm, the
+  lives on its cosign-taproot ancestors. On seeing the input's chain confirm, the
   server MUST broadcast the retained transaction(s), fee-bumped via the P2A
   anchor, ahead of the input's `exit_delta` window. This duty is the
   forfeit-watch pattern (ARK #4, ARK #7) applied to an open — and it is
@@ -669,26 +515,27 @@ Concretely — each an observable property that MUST survive a crash:
 An upgrade adds no arkoor double-sign trust of its own — only the holder can
 request spends of its own input, so the self-spend introduces no new
 co-signing surface. The scope inherits exactly the trust the input already
-carried: an arkoor-received input keeps its refresh recommendation (ARK #5),
-which the next channel refresh satisfies.
+carried: an arkoor-received input keeps its refresh recommendation (ARK #5).
+The core offers no in-place way to satisfy it — the channel settles
+(downgrade), its outputs refresh in an ordinary round, and the channel
+re-opens — so a client SHOULD refresh a third-party arkoor receipt in a
+round before upgrading it.
 
 ## Operation
 
 Once open, payments flow over the channel using the Lightning protocol (BOLT),
-unmodified, and the funding VTXO sits unchanged until the channel is refreshed,
-closed, or force-closed.
+unmodified; no payment or commitment update touches the funding VTXO.
 
 The Ark/Lightning boundary is drawn as follows.
 
 **Normative (Ark side):**
 
-* the channel is of the Ark channel type (see "The Ark channel type");
 * the channel VTXO output and the bridge transaction — exact construction and
   value (see "The channel VTXO and the bridge transaction");
 * that the **bridge** spends the channel VTXO output through the key path, signed
   by `musig(A, S)`: a BIP-327 MuSig2 partial signature over the BIP-341 key-path
   (taproot-tweaked) sighash, aggregated from `A` and `S` sorted per ARK #0's
-  KeySort. This is a one-shot cosignature collected in the open/leaf cosign (see
+  KeySort. This is a one-shot cosignature collected in the open cosign (see
   "Messages"), not per-commitment. The commitment in turn spends the bridge's
   funding output through the stock BOLT-3 2-of-2 (ECDSA), with no Ark involvement
   per update.
@@ -699,13 +546,1182 @@ anchors, HTLCs), HTLC resolution, channel quiescence, and the channel state
 machine. The virtual-funding confirmation and chain-feed requirements are
 normative and are specified in "Trust assumptions" above.
 
+## The close
+
+A cooperative channel close has two halves, in strict order. First the
+channel is closed at the Lightning layer by the standard BOLT-2 close —
+`shutdown`, HTLC drain, closing negotiation — which terminally fixes the
+final balances. Then the close is settled at the Ark layer by the
+**downgrade** ("Downgrade: close into Ark balance", below): the sanctioned
+split of the channel VTXO into plain `pubkey` VTXOs matching those balances.
+An on-chain exit, when wanted, is the ordinary ARK #7 offboard of those
+`pubkey` VTXOs afterwards — nothing channel-aware remains in it. (The
+retired channel-offboard variant settled the close by a direct payout and a
+forfeit of the channel VTXO under an amended balance rule; the downgrade
+subsumed it.)
+
+The close is the ordinary BOLT-2 closing flow (referenced, not restated):
+either peer MAY initiate with `shutdown` — the server included, e.g. to wind
+down an idle channel, though the Ark leg that follows is always the user's to
+drive. From `shutdown` on, no new HTLC is offered while in-flight HTLCs
+resolve normally; once the channel is empty of HTLCs, closing negotiation
+(`closing_signed`, or `closing_complete` / `closing_sig` under
+`option_simple_close`; the reference uses `closing_signed`) produces a fully
+signed **closing transaction** spending the funding output. Channel
+quiescence (BOLT-2 `stfu`) plays no part: `stfu` cannot
+be sent while updates are pending, forbids the very settles a drain needs,
+does not survive disconnection, and force-disconnects after 60 seconds with
+HTLCs still committed — it freezes an *operating* channel for a moment,
+whereas `shutdown` drains a *terminating* channel monotonically, for as long
+as that takes, surviving reconnection via `channel_reestablish`
+retransmission. The freeze the settlement needs is not an extra protocol at
+all; it is the close itself.
+
+The closing transaction is negotiated exactly per BOLT-2, but its job here is
+not to be broadcast: the funding output it spends is the bridge's output,
+which exists only in the off-chain exit chain (virtual funding), so on the
+cooperative path it can never confirm, and neither side need relay it (a
+stack that broadcasts it unconditionally is harmless — the transaction spends
+an outpoint the chain has never seen). Its jobs:
+
+* **The balance agreement.** Completing the negotiation commits both peers,
+  by signature, to the same pair of final balances — a peer that disagreed
+  would produce a closing signature that fails to verify, aborting the close
+  before the Ark flow rather than surfacing inside it. The split's balance
+  verification ("Downgrade: close into Ark balance", Admission) is checked
+  against this close-fixed figure, not a live channel-state read,
+  and the figure cannot go stale: the close is terminal, so no later update
+  can move it.
+* **The user's fallback between close and settlement.** Until the split's
+  registration, the
+  user can settle the closed channel without the server: exit the VTXO
+  (ARK #6), broadcast the bridge, and spend the funding output with the
+  closing transaction in place of the commitment — the better tail, since its
+  outputs carry no `to_self_delay` and the channel is empty of HTLCs by
+  construction (the final commitment, never revoked, remains valid too). The
+  closing transaction is an ordinary v2 transaction broadcast only after the
+  bridge confirms, so TRUC's unconfirmed-ancestry rules never see it; a stale
+  negotiated fee is repaired by CPFP of the user's own output.
+* **Nothing, after the settlement.** Once the split is registered, the
+  closing transaction — exactly like
+  the commitment — can no longer reach the chain: the retained split
+  transaction spends the channel VTXO output with no timelock,
+  ahead of the bridge's `exit_delta` ("Where the race is decided").
+  Holding a signed closing transaction therefore gives the user
+  no post-settlement claim; enforcing that is the split-response watch.
+
+Requirements:
+
+* The user MUST complete the close — hold a fully signed closing transaction
+  paying its final balance (less any closing fee it pays) — before the
+  split's cosign request. This is the exit-before-forfeit discipline of ARK #4:
+  the closing transaction is the exit story the user falls back on if the
+  server stops cooperating after the close.
+* The server MUST NOT cosign a split of a channel VTXO whose channel has
+  not completed the close — before that point there is no fixed balance to
+  verify the destinations against ("Downgrade: close into Ark balance",
+  Admission). It MUST retain
+  the close outcome (the final balances, keyed to the channel's backing
+  VTXO) until the VTXO is resolved — split or expiry-swept —
+  since the settlement may arrive arbitrarily later, after its Lightning
+  stack has forgotten the channel.
+* The close outcome MUST survive anything that happens after the close
+  completes — a crash, a restart, or however the implementation routes its
+  close notifications — until the backing VTXO is resolved. For the server the
+  outcome is the close-fixed balances, bound to the exact channel and backing
+  VTXO; for the user it additionally includes the fully signed closing
+  transaction, which MUST be retained from the moment its final signed form
+  exists. Whether the settlement is driven interactively, by a background
+  task, or by recovery, all of them MUST see the same recorded outcome —
+  beginning the Ark leg MUST NOT depend on having personally observed the
+  close complete. A party that cannot record the outcome MUST NOT report the close
+  complete or begin the Ark leg, and MUST keep the channel fail-closed rather
+  than lose the outcome.
+* A completed cooperative close is not a force-close: automatic recovery MUST
+  NOT react to one by starting the unilateral exit or by discarding the close
+  outcome. The user retains the unilateral path as a fallback and may take it
+  on explicit policy (for example server failure or the expiry deadline), but
+  a failed or delayed settlement remains retryable from the recorded close
+  outcome first.
+* A completed close disappears from the live Lightning channel set, but it does
+  not disappear from expiry scheduling. Until the settlement is past its point
+  of no return — for the downgrade, registration of the complete split
+  ("Registration and the split response") — the client MUST hold the closed
+  channel and backing scope to the same force-close deadline as an operating
+  channel; if no settlement is potentially final by that deadline, it MUST
+  begin the unilateral fallback in time to confirm the bridge before expiry.
+* The closing fee (BOLT-2) is deducted from closing outputs only — under
+  `closing_signed` from the funder's (the user's: it opened the channel),
+  under `option_simple_close` from each closer's own. It never enters the
+  settlement, which is verified against the pre-fee final balances; the
+  user SHOULD negotiate it low, since the closing transaction is broadcast
+  only in the fallback, where it can be fee-bumped at use.
+* The unilateral fallback MUST be able to confirm at current feerates: either
+  the closing transaction is submitted with a fee-paying child spending the
+  user's shutdown output, or the latest non-revoked commitment is used with
+  its Lightning anchor/package path instead. A retained low-fee closing
+  transaction with neither fee path is not a complete fallback, and
+  re-selecting it unchanged makes no progress.
+* **A failed fee negotiation wedges the close; policy should make it
+  unfailable.** Under `closing_signed`, disjoint fee expectations leave the
+  channel closing-but-never-closed: `shutdown` has already barred updates,
+  no close record exists,
+  and no settlement can begin — the recourse is the unilateral fallback
+  under "The force-close deadline", via the commitment path (no
+  closing transaction was ever signed). The negotiation is not worth
+  failing: the fee buys nothing in the cooperative outcome — it is deducted
+  only from the fallback artifact, and every settlement is verified against
+  the pre-fee balances — so the non-funder (the server, in every channel of
+  this document) SHOULD accept any fee at or above its relay floor, and the
+  funder SHOULD prefer conceding upward to wedging, since its fallback
+  retains the commitment alternative regardless. `option_simple_close`,
+  where each closer pays from its own output under unconditional
+  signatures, removes the negotiation — and this failure mode — entirely,
+  and SHOULD be preferred once available.
+
+The close is a one-way door: `shutdown` commits the channel to closing
+(BOLT-2), and there is no abort-and-resume. Before the split's cosign request may
+have been sent, a settlement failure leaves the channel closed but loses
+nothing — balances stay fixed, the downgrade can be retried, and the
+unilateral fallback remains available. What the close does not extend is
+expiry: while no settlement is completing, the client MUST begin fallback in
+time to confirm the bridge before expiry ("The force-close
+deadline"). The downgrade's own point of no return and recovery are specified
+in its section; past it, the old scope MUST NOT be broadcast.
+
+## Downgrade: close into Ark balance
+
+A **downgrade** is the upgrade run in reverse: a cooperative close whose
+settlement stays off-chain: the cooperative close's two halves ("The
+close"), in the same strict order — first the standard BOLT close terminally
+fixes the final balances; then the
+close is settled at the Ark layer by an out-of-round **split** (ARK #5): a
+single-part transfer that spends the channel VTXO into plain `pubkey` VTXOs
+matching the close-fixed balances — the user's to `pubkey(A)`, the server's
+to `pubkey(S)`. The user's funds re-enter its ordinary Ark balance with no
+round to wait for and no on-chain footprint; the commitment, the bridge, and
+the closing transaction all lose their roles once the split is registered —
+what stands watch from then on is the response duty below. Like the
+upgrade, the downgrade adds
+no wire fields at all: the split is a plain ARK #5 request, distinguished
+only by its input's `channel-funding` policy, and the server identifies the
+channel from its own record of which VTXO backs it.
+
+```
+   channel VTXO output: taproot(musig(A,S); {expiry, marker})     [old chain
+        │  (checkpoint tx, per the server's checkpoint policy —   and anchor,
+        │   spends by key path, nSequence = 0, ahead of the       unchanged]
+        ▼   retired bridge's exit_delta)
+   checkpoint outputs
+        │  (arkoor transactions)
+        ▼
+   pubkey(A) VTXO: the user's final balance   ·   pubkey(S) VTXO: the server's
+```
+
+### The split
+
+The split is a standard ARK #5 transfer — checkpoint machinery, balance,
+dust, and signing rules all unchanged — shaped by the close it settles:
+
+* **One part, the backing VTXO.** The split MUST be a single-part package
+  whose input is the closed channel's backing VTXO. Mixing other inputs
+  would make the balance attribution ambiguous; the restriction costs
+  nothing, since the
+  resulting `pubkey` VTXOs batch freely with the user's other funds from the
+  next operation on.
+* **Destinations are the close, restated.** Every destination MUST carry the
+  `pubkey` policy with `user_pubkey` equal to `A` (the channel VTXO's user
+  key — the requester is the arkoor sender, exactly the upgrade's self-spend
+  binding) or to `S` (the server pubkey), and the per-key totals MUST equal
+  the final balances fixed by the completed close, before any closing-fee
+  deduction — the closing fee is never paid, since the closing transaction is
+  broadcast only in the fallback. **The sub-satoshi remainder.** Lightning
+  balances are in millisatoshis, and the channel VTXO's value is a whole-sat
+  amount, so the two msat balances sum to `V × 1000` exactly but their
+  individual millisat remainders sum to either `0` or `1000`. Each side's sat
+  total is its close-fixed balance floored to whole satoshis; when the two
+  floors fall one satoshi short of `V` (the balances carried a sub-sat
+  remainder, which a BOLT close would drop to the closing fee), that single
+  satoshi MUST be added to the user's `pubkey(A)` total. The destination
+  amounts then sum to `V` exactly, so ARK #5's exact-balance rule holds with
+  no remainder; the odd satoshi favors the user, and the server MUST verify
+  the split on this same floor-plus-remainder basis. A side whose balance
+  floors to zero (and receives no remainder) gets no output. The rule is over
+  per-key *totals* — the summed value to each key, not a count of wire
+  entries — so ARK #5's dust isolation, which may split one side to lend the
+  combined isolation output its floor, composes with it (that split re-routes
+  value but moves none between keys; see the relayability floor below). A
+  balance too small to pay out on-chain settles here at full value in
+  the sense that matters off-chain: it becomes a fully-valued, *cooperatively
+  usable* `pubkey` VTXO — spendable by arkoor, refreshable in a round. A
+  sub-dust VTXO is not, however, *independently* unilaterally exitable: like
+  any sub-dust output, its own isolation-fanout level is non-standard to
+  broadcast alone, so it exits only alongside its isolation cohort or by a
+  cooperative spend. "Full value" here means off-chain usability, not
+  standalone on-chain exit. (Binding the user side to `A` keeps the
+  whole destination set verifiable from the server's own records; loosening
+  it — paying third parties directly out of the close — would not disturb the
+  server-share rule, but stays out until something needs it.)
+* **The split response must be relayable (the standardness floor).** The
+  transaction the server broadcasts in the split response — the checkpoint
+  spending the channel VTXO output, or the arkoor transaction when
+  `use_checkpoint = false` — MUST be standard, or the defense of "Registration
+  and the split response" can never reach a mempool. The server MUST verify
+  this on the **reconstructed conflict-winning transaction directly**: beyond
+  the single P2A anchor it MUST carry no output below `P2TR_DUST` (Bitcoin Core
+  relays at most one dust output per transaction). Two rules make that
+  reachable, and ARK #5's permissive "MAY mix without isolation" does **not**
+  apply to a downgrade:
+  * **Net per-key totals, not per-entry.** A side's balance may be carried by
+    more than one wire entry only as the isolation lender fragment (below); a
+    requester MUST NOT otherwise fragment a side into several same-key
+    destinations to force multiple sub-dust outputs into the conflict-winning
+    transaction. The direct standardness check above rejects any split that
+    would.
+  * **Sub-dust side ⇒ mandatory isolation, and `V ≥ 2·P2TR_DUST`.** When one
+    side's balance `d` is below `P2TR_DUST` (call it `D`), the split MUST
+    isolate it: the request routes `d` together with a lender fragment `D − d`
+    split off the other side through the combined isolation output (value
+    `D`), leaving the other side's remainder `V − D` as the standalone normal
+    output. This is the one place the wire carries two entries for a single
+    key — the lender's remainder in `outputs` and its `D − d` fragment in
+    `isolated_outputs` — which the net-totals rule permits. The checkpoint is
+    then `[V − D, D, P2A]`, standard iff `V − D ≥ D`, i.e. **`V ≥ 2·P2TR_DUST`
+    (660 sats)**. A downgrade of a channel below that total with a sub-dust
+    side has no standard conflict-winning transaction; the server MUST refuse
+    it (the remaining settlement is the unilateral fallback). This floor is
+    normative, not an economic assumption — BOLT does not forbid a sub-660
+    channel (minimum funding is receiver policy), so the server MUST enforce
+    it rather than assume such channels do not exist. And because the split's
+    total `V` is the channel's capacity, fixed at open, the same bound MUST be
+    enforced at **channel-open admission** (both sides): a channel funded
+    below `2·P2TR_DUST` could close into balances with no cooperative
+    settlement — a jagged edge no one should be allowed to open onto. (That
+    today's Lightning implementations refuse such channels for their own
+    reserve reasons is an implementation coincidence, not this bound.)
+* **The server as recipient.** `pubkey(S)` makes the server's share an
+  explicit VTXO the server holds as its own user — roles here are keys, not
+  identities — an explicit share, where a forfeit-based settlement would pay
+  the server implicitly. There is no forfeit in a downgrade; the split spending the
+  channel VTXO output by key path at `nSequence = 0`, ahead of the retired
+  bridge's `exit_delta`, is what plays the forfeit's role (see the response
+  duty, below).
+* **No fee.** Like the upgrade: the split commits no new server capital and
+  inherits the scope's existing maturity, so like any arkoor transfer it is
+  not separately priced.
+* **Inherited scope and the depth bound.** The new VTXOs inherit the input's
+  `expiry_height`, `exit_delta`, and anchor (ARK #5), at one more exit level
+  without a checkpoint or two with one; the user refreshes them per ARK #4 as
+  it would any VTXO. Two depth facts bite. First, the split can be *cosigned*
+  only if the channel VTXO's own depth leaves room: ARK #2 refuses a
+  transition spending an input at depth `≥ max_vtxo_exit_depth`, and a
+  checkpointed split spends the checkpoint output (input depth + 1), so a
+  no-checkpoint split needs input depth `≤ max_vtxo_exit_depth − 1` and a
+  checkpointed one `≤ max_vtxo_exit_depth − 2`. A channel too deep to split
+  has no cooperative settlement — only the unilateral fallback — and
+  the user MUST make that check **before initiating the close**: the close
+  is a one-way door. Open admission SHOULD therefore leave split headroom
+  from the start ("Open by upgrade"). Second, the split
+  *outputs* may legitimately land at `max_vtxo_exit_depth` (a checkpointed
+  split of an input at `max − 2`, which adds two levels): the funds are fully
+  recovered as `pubkey`
+  VTXOs, but such a maximal-depth VTXO cannot be arkoor-spent again until a
+  round refresh resets its depth — the ordinary deep-VTXO discipline (ARK #5
+  already recommends refreshing an arkoor-received VTXO), not a fund-safety
+  concern.
+
+### Admission
+
+A `channel-funding` VTXO has no user spending clause: every cooperative
+spend of it is a `musig(A, S)` act the server co-authors. The server MUST
+NOT cosign any arkoor spend of a `channel-funding` input except the
+sanctioned split of this section (restated for the generic endpoint in
+ARK #5), and MUST verify the split against the close outcome it recorded
+under "The close" — the close-fixed record written at `ChannelClosed`,
+bound to exactly this backing VTXO. Each party enforces from its own view:
+the client MUST refuse to build, and the server MUST refuse to cosign, a
+split that violates the shape above — no recorded completed close for the
+input's channel, a destination key outside `{A, S}`, a per-key total
+differing from the close-fixed balances, or a reconstructed conflict-winning
+transaction that is not standard (the relayability floor).
+
+**The spent-state is a single atomic reservation (normative).** The property
+that no VTXO is ever consumed by two settlements is not an incidental
+consequence of any one flow's bookkeeping but a MUST on the server: every
+**server-mediated** consumer of a VTXO — `prepare_offboard` /
+`finish_offboard` (ARK #7), the arkoor cosign incl. this split (ARK #5), and
+round participation (ARK #4) — MUST check-and-set *one* atomic per-VTXO
+spent-or-reserved state, so that a VTXO reserved or spent by any of them is
+refused by all the others until it is released or resolved. An implementation
+that guards these flows with independent locks is non-conforming.
+(Unilateral exit is *not* a server-mediated flow and is not governed by this
+reservation; its races are the on-chain `nSequence = 0`-versus-`exit_delta`
+semantics of the split response and "Unilateral exit / force-close".)
+
+Under that reservation the ordering is definite: the split's spent-mark is
+written before signing (ARK #5) and is never unwound — un-marking would
+leave the user holding a completable split while another flow consumes the
+same output, two `nSequence = 0` spends racing with no defender's lead. The
+choice of settlement is therefore made at the split cosign, not at
+registration. Retries of the split itself follow ARK #5's
+operation-identity rule unchanged.
+
+### Registration and the split response
+
+**What the downgrade takes from "The close," and what it does not.** The
+downgrade shares the close's balance half exactly: the BOLT close fixes the
+final balances (the object the split is verified against), and the signed
+closing transaction is the user's fallback between close and settlement,
+under the same retention and force-close-deadline discipline. It does **not**
+prescribe any other Ark-leg recovery: the downgrade's point of no return
+and its recovery are the split's own, specified here.
+
+The ordering and recovery posture are the upgrade's, run in reverse. The
+arkoor txids are witness-independent, so the user verifies every partial
+signature and completes the split knowing exactly the transactions the
+server can later hold; until the user registers the signed transactions
+(ARK #5), the server holds only its own partials (first-signer one-shot,
+ARK #0) and cannot actualize the split — so the closing-transaction
+fallback of "The close" remains *safe*, not merely available. Registration
+is the point of no return: it is what arms the server's response and
+retires the fallback. **Registration here means the complete split** — every
+arkoor level of *both* the `pubkey(A)` and `pubkey(S)` outputs, not ARK #5's
+"at minimum the checkpoint" — because the server's response (below) and its
+own `pubkey(S)` share are actualizable only if it durably holds the whole
+signed chain; a server MUST NOT treat a downgrade as registered, arm its
+response, or consider the settlement final until it does. Concretely:
+
+* Before registration is eligible to have been sent, a failed exchange
+  leaves a closed channel and an unresolved (possibly spent-marked) VTXO:
+  retry the cosign under ARK #5's operation-identity rule, or fall back to
+  the unilateral close path — old chain, bridge, closing transaction —
+  before the force-close deadline, which the closed channel keeps until a
+  split is registered ("The close").
+* From the moment registration is eligible to have been sent, and across
+  any restart, the user MUST NOT broadcast the old scope — the split
+  outraces the bridge, so the fallback can no longer win, and the user does
+  not need it to: its balance is the new `pubkey` VTXO(s), recovered if
+  need be by replaying the idempotent registration. Ordinary VTXO
+  discipline governs from here, against the inherited expiry.
+
+Registration arms the **split response** — the parent-exit response of the
+upgrade, made symmetric, because for the first time both parties hold value
+behind the retained transactions. The old scope's exit chain remains fully
+signed in both parties' hands, and the bridge (delayed `exit_delta`) is its
+only other spender, so whoever actualizes the old chain opens the same
+race the forfeit-watch pattern answers. Each duty is an observable property
+that MUST survive a crash:
+
+* The server MUST retain the fully signed split transactions from
+  registration, and MUST watch for any prefix of the channel VTXO's exit
+  chain confirming, for as long as the retired bridge remains confirmable:
+  until the channel VTXO's output is conclusively spent on-chain, or a
+  confirmed expiry sweep of an ancestor has made its creation impossible.
+  Onward movement of the split outputs does not end the duty — it raises
+  the stakes, since everything cosigned on top of them evaporates if the
+  bridge wins. On seeing the chain confirm, the server MUST broadcast the
+  retained checkpoint (or arkoor) transaction, fee-bumped via its P2A
+  anchor, ahead of the bridge's `exit_delta` window.
+* The user MUST keep the same watch for its own share. The server holds the
+  old scope's signed exit chain too, and its expiry-sweep leaf takes the *whole*
+  output: a server that actualized the old chain and sat out the clock
+  would sweep both balances at expiry. The user's response is the same
+  broadcast — its split transactions are its new VTXOs' genesis levels, so
+  retaining them is not a new obligation, only watching is. Like the
+  force-close deadline, this duty is the user's own protection; it cannot be
+  delegated to the counterparty it defends against. Being scoped to the
+  share, the duty ends when no split output remains the user's own:
+  refreshed, the replacement is anchored independently of the old chain;
+  exited, the response has already been given; spent onward, the recipient
+  inherits the ordinary arkoor sender-history exposure (ARK #5), answered
+  as ever by its refresh recommendation — while the server's watch, which
+  onward movement does not end, continues to defend the whole downstream.
+* The response actualizes part of the new VTXOs' genesis chains and nothing
+  else: the bridge and the closed channel's transactions are unaffected
+  (and now unconfirmable), and the server's expiry-sweep recourse over the
+  actualized outputs is preserved.
+
+**Where the race is decided.** The contested event is the confirmation of
+the exit chain's *final* transaction — the one that creates the channel
+VTXO's output on-chain and thereby starts the bridge's `exit_delta` clock.
+Neither endpoint of intuition is it: not the closing transaction, which
+spends the bridge and merely finishes an already-won fallback, and not the
+bridge's own confirmation, which would leave the whole `exit_delta` window
+undecided. Nor is it any earlier prefix of the chain confirming: prefixes
+are shared ancestors that actualize whenever a co-user of the same tree
+exits, the contested output does not yet exist, and no clock runs — a
+confirmed prefix sharpens the watch (the duty above) but decides nothing,
+and in particular MUST NOT be treated as the fallback in progress. What
+the final transaction's confirmation means is fixed by whether the
+complete split was registered when it happened. Registered first: the
+armed response wins by construction — the retained conflict-winning
+transaction spends the just-actualized output at `nSequence = 0`,
+`exit_delta − 1` blocks ahead of the bridge — and the split settles the
+close. Confirmed first, split unregistered: the settlement is the
+unilateral fallback, already in progress — the server holds no signed
+response and its watch resolves with none — and the server MUST refuse the
+split's registration from then on, even though the bridge's `exit_delta`
+has not yet elapsed and a late-armed response could in principle still
+outrace it. The reason is that the two settlements conflict only at the
+contested output, while a VTXO's value is not that output but the server's
+off-chain recognition of it, which no on-chain conflict polices: a server
+that recognized the split after conceding the chain race would settle the
+same close twice — the closing transaction pays the final balances on-chain
+while the registered VTXOs are honored off-chain, paying the user's side
+twice. The refusal extends the settlements' on-chain mutual exclusion to
+that recognition, and is the downgrade's counterpart of the upgrade's
+late-registration refusal ("Open by upgrade"), where completing after the
+abort would release the channel instead.
+
+### Sequence
+
+```
+ 1. [BOLT]  shutdown (either peer) → no new HTLCs; in-flight HTLCs resolve →
+            closing negotiation → fully signed closing tx in hand
+            → record the close outcome (exact backing, final balances,
+              closing tx)
+            ──────── the channel is now closed; final balances fixed ────────
+ 2. [local] build the split over the channel VTXO: destinations pubkey(A) /
+            pubkey(S), per-key totals = the close-fixed balances, dust and
+            checkpoint per ARK #5 and server policy
+            ──────────────── LAST FULLY-FREE ABORT ────────────────
+ 3. [Ark]   arkoor_cosign_request (single part; the sanctioned split) →
+            server verifies against the recorded close outcome, persists the
+            input as spent, returns the ARK #5 partial signatures
+ 4. [local] verify every partial signature and complete; the new VTXOs' full
+            exit story is now held (the closing-tx fallback is still safe)
+ 5. [Ark]   register the signed transactions (ARK #5)
+                                                *** POINT OF NO RETURN ***
+ 6. [both]  retain the split transactions and watch the old chain (the split
+            response, symmetric); the user's balance is ordinary pubkey
+            VTXOs — refresh before the inherited expiry as usual
+```
+
+A failure at step 2 costs nothing and keeps every option open: split,
+or the unilateral fallback. From the moment step 3's request is
+eligible to have been sent, the settlement is committed to the split — the
+spent-mark forecloses any other consumer of the backing ("Admission") — and a failure at steps
+3–4 leaves retry under the operation-identity rule, or the unilateral
+fallback, which stays safe until step 5. Step 5 is the one-way door, with
+its recovery — idempotent registration, then ordinary VTXO custody —
+specified above. Open = upgrade (over any `pubkey` VTXO — a fresh board
+included), close = downgrade (followed by the generic ARK #7 offboard when
+an on-chain exit is wanted): a channel touches the generic flows at exactly
+two seams — upgrade and downgrade — and every other operation is
+plain-VTXO Ark.
+
+## Unilateral exit / force-close
+
+When the server is unavailable or uncooperative, the user recovers its funds
+with no help, by exiting the channel VTXO on-chain, broadcasting the bridge, and
+force-closing the channel. The halves compose: the VTXO exit (ARK #6) brings the
+channel VTXO output on-chain; the bridge actualizes the funding output; the
+force-close (BOLT) then spends it.
+
+1. **Exit the VTXO (ARK #6).** Broadcast the channel VTXO's genesis chain, root
+   first, until the `channel-funding` output is confirmed on-chain. This is an
+   ordinary emergency exit: TRUC (v3) transactions, P2A/CPFP fee-bumping, each
+   level after its parent confirms.
+2. **Broadcast the bridge.** The presigned bridge spends the channel VTXO output
+   and produces the funding output. Its input carries a relative timelock of
+   `pinned_exit_delta` (`nSequence`; see "The channel VTXO and the bridge transaction"),
+   so the bridge becomes valid only `pinned_exit_delta` blocks after the VTXO output
+   confirms — the channel's unilateral-exit delay, the *same* a `pubkey` exit
+   waits (ARK #6). It is a TRUC v3, P2A/CPFP transaction like the genesis chain.
+3. **Force-close.** Broadcast the latest commitment transaction, which spends the
+   now-on-chain funding output through the stock BOLT-3 2-of-2 (ECDSA). The
+   commitment carries no extra delay of its own — the exit delay was already
+   served on the bridge input — so it confirms once the bridge does. (After a
+   completed cooperative close whose settlement never resolved, spend the
+   funding output with the closing transaction instead — no `to_self_delay`,
+   no HTLCs; see "The close".)
+4. **Claim.** Once the commitment confirms, claim its outputs (`to_local`,
+   `to_remote`, and resolved HTLCs) per the channel's BOLT-3 rules
+   (referenced).
+
+Unlike a `pubkey` exit (ARK #6), there is no VTXO-level `delayed-sign` claim; the
+channel VTXO's value is claimed only through the bridge and then the commitment.
+
+### Server recourse after expiry
+
+The channel VTXO output's `timelock-sign(expiry_height, S)` leaf lets the server,
+after `expiry_height`, sweep the channel VTXO output directly — without the bridge
+or commitment — just as it may sweep any unspent cosign-taproot output past expiry
+(ARK #4, ARK #6). This is the server's recourse when a user has actualized the
+VTXO output on-chain but left the channel otherwise unresolved (for example,
+exited the VTXO but never broadcast the bridge). It is bounded by `expiry_height`,
+which is why the user MUST close or exit before expiry.
+
+### Server recourse after the bridge confirms
+
+Once the user has broadcast the bridge, the sweep recourse is gone — the
+expiry leaf sat on the now-spent VTXO output ("The force-close deadline").
+From that point the channel is an ordinary on-chain-funded Lightning
+channel, and the server's recourse against an absent or uncooperative
+counterparty is the **standard BOLT force-close**: broadcast its own latest
+commitment and claim its outputs per BOLT-3. This is expected, not
+exceptional — a user can actualize the funding unilaterally at any time and
+then simply stop cooperating, and a server with balance or unresolved HTLCs
+in the channel MUST eventually force-close to recoup them. It does not
+weaken the no-unroll rule: the user actualized the funding, and the
+server's broadcast spends an output that already exists on-chain —
+it actualizes nothing. It needs no retained bridge either: the user's
+broadcast supplied it. A server with nothing in the channel MAY instead
+leave it open indefinitely, accepting the monitoring cost (the user may
+well still be using it — an actualized funding is not a closed channel).
+
+### The force-close deadline
+
+The expiry sweep above sets a hard deadline: the user MUST get the **bridge
+confirmed before `expiry_height`**. Once the bridge confirms, the funding output
+is an ordinary on-chain UTXO and the expiry-sweep leaf — which sat on the
+now-spent VTXO output — can no longer reach it; the commitment and any HTLCs then
+resolve on their own BOLT-3 timelocks, no longer bounded by `expiry_height`.
+Before the bridge confirms, the whole channel VTXO — both balances and any
+in-flight HTLC value — is exposed to the sweep.
+
+Reaching that point unilaterally takes, in series: the genesis exit chain (the
+VTXO's exit depth, at most the scope's pinned
+`channel_max_vtxo_exit_depth`, each level confirming), the bridge's
+`pinned_exit_delta` relative timelock, and the bridge's own confirmation, plus
+fee-bumping slack. Call that total the scope's **CLTV floor**:
+
+    F = channel_max_vtxo_exit_depth + pinned_exit_delta + cltv_claim_slack
+
+— every relative timelock on the unilateral path plus the unroll distance to
+the commitment, where `cltv_claim_slack` is a configured safety margin
+covering the genesis, bridge, commitment, and HTLC second-stage confirmations
+and their fee-bumping lag under congestion. Every computation over `F` MUST
+use checked arithmetic, and an implementation MUST refuse to operate a
+channel whose `F` does not fit the `u16` `cltv_expiry_delta` fields that
+carry it. The user MUST begin a force-close at least `F` blocks before the
+scope's fixed `expiry_height`. The deadline is the **bridge's** confirmation:
+the commitment confirms only after the bridge and, once the bridge has spent
+the VTXO output, is no longer bounded by `expiry_height` (above), so it does
+not enter this margin.
+
+`F` is also the floor under **every per-HTLC CLTV decision**, because the
+Lightning stack was told the funding is confirmed and budgets none of the
+actualization path: an HTLC whose remaining budget is below `F` can expire
+before any on-chain claim of it is even *possible* — a deterministic loss,
+independent of who wins any subsequent race. A node MUST enforce
+`cltv_expiry − real_chain_height ≥ F` — the receiving channel's floor — on
+every HTLC it accepts, which covers spontaneous (keysend) payments
+per-HTLC, with no blanket rule needed. An invoice not bound to a single
+receiving channel MUST advertise at least the **maximum** `F` across the
+channels it could be paid over, so the budget holds wherever the payment
+lands. A forwarding node MUST require
+`incoming_cltv − outgoing_cltv ≥ F_in` — the **incoming** scope's floor,
+since that is the channel whose HTLC it must claim on-chain if the
+outgoing leg resolves late — or advertise a `cltv_expiry_delta` that
+dominates every incoming scope able to feed the hop. And a node MUST
+initiate a force-close no later than the point where an unresolved
+in-flight HTLC it must drive on-chain has exactly `F` of budget remaining.
+
+The pre-expiry discipline therefore runs on **two thresholds**. At an
+earlier **cooperative lead** — separately derived, since `shutdown`, HTLC
+drain, and closing negotiation are unbounded in time — the user stops
+offering new HTLCs and initiates the close ("The close"). At the hard
+**force-close margin** (`F` blocks before `expiry_height`) the node MUST
+force-close unless a complete split registration is already potentially
+final ("Registration and the split response") — waiting on a cooperative
+settlement past that margin spends the bridge-confirmation budget itself.
+What blocks a timely cooperative resolution is an **unresponsive peer**;
+absent one, the node force-closes unilaterally.
+
+A channel carried too close to expiry — for example one an unresponsive peer
+prevents settling — can lose the entire VTXO to the sweep. This deadline is
+the user's own discipline, not a forwarding restriction on the server: the
+server's expiry-sweep leaf *gains* the whole channel on a missed deadline (see
+"Security and trust notes"), so it has no aligned incentive to stop forwarding
+HTLCs onto a channel nearing expiry. The user cannot rely on it and MUST protect
+itself by closing or exiting in time.
+
+## Messages
+
+Channels reuse the Ark messages of ARK #5 (arkoor) and ARK #4 (round). The
+core changes exactly one RPC exchange — the arkoor cosign request and its
+response — given below in full: base fields as defined in the home document,
+with the channel-specific fields called out.
+Every channel-specific field is absent for a non-channel operation, and a
+peer that does not implement channels ignores it (see "Compatibility"); no
+other Ark message changes for the core, and channels add no new Ark RPC.
+The refresh extension's message variants — `leaf_vtxo_cosign` and the
+`submit_round_participation` response — are specified with that extension
+(see "Refresh"; the teleport itself adds messages on the Lightning
+transport, not the Ark service).
+
+### `arkoor_cosign_request` (ARK #5)
+
+The channel variant is the ARK #5 `arkoor_cosign_request` with two channel
+fields added, carried on the part whose destination set includes
+the `channel-funding` output; the server cosigns the transfer and the bridge in
+one exchange. A package MUST carry at most one part with these fields (exactly
+one `channel-funding` destination; "Open by upgrade").
+
+| Field | Type | Meaning |
+|---|---|---|
+| *ARK #5 part fields* | | `input`, `outputs`, `isolated_outputs`, `use_checkpoint`, `user_pub_nonces`, `attestation` — unchanged (ARK #5) |
+| `channel_id` | 32 bytes | the channel's id: the upgrade assigns the funding outpoint before this cosign, so this is the channel's **permanent** BOLT-2 id; its presence marks the part as an upgrade and it MUST match the identifier under which the server stored the channel's funding keys |
+| `bridge_pub_nonce` | musig_pub_nonce | the user's MuSig2 public nonce for the **bridge** key-path sighash |
+
+From these the server reconstructs the ARK #5 transactions exactly as the
+generic endpoint does, then the bridge — input = the `channel-funding` output
+of the reconstructed transfer (keyspend `musig(A, S)`,
+`nSequence = pinned_exit_delta`, the input VTXO's decoded `exit_delta`),
+output 0 = P2WSH 2-of-2 of the channel's funding keys (looked up by
+`channel_id`), output 1 = P2A, 0-fee (see "The channel VTXO and the bridge
+transaction"). The response is the ARK #5 `arkoor_cosign_response`, extended
+with the server's bridge `pub_nonce` + `partial_sig`. The attestation is the
+unchanged ARK #5 attestation: the destination's policy bytes already commit
+the `channel-funding` `user_pubkey` and amount, and a tampered `channel_id`
+yields a bridge over the wrong funding keys, which the client rejects at
+partial-signature verification, before completing anything.
+
+Requirements (server): the ARK #5 requirements apply, and additionally —
+
+* When `channel_id` is present, the named channel MUST be one the server is
+  opening: funding keys exchanged, not yet operating (no prior funding
+  registered, `ChannelReady` never sent), and its Lightning establishment run
+  against exactly the funding output this cosign produces. Two equalities
+  bind that: the channel's assigned funding outpoint MUST equal the
+  reconstructed transfer's `bridge_txid:0`, and the reconstructed bridge's
+  output 0 MUST equal the channel's negotiated funding output — value equal
+  to the negotiated funding amount (equivalently: the `channel-funding`
+  destination's amount MUST equal `open_channel.funding_satoshis`), script
+  the P2WSH 2-of-2 of the stored funding keys. The outpoint alone does not
+  bind the amount: the txid commits the bridge's value, but nothing ties the
+  *negotiated* amount to it, and the Lightning stacks sign every commitment
+  over the negotiated amount (BIP-143 commits the input value) — a mismatch
+  yields commitments unusable against the real output, an unexitable
+  channel, and, once the bridge confirms, funds stranded in a 2-of-2 no
+  expiry leaf reaches. (The upgrade exchanges the initial commitment
+  *before* the cosign, so an assigned funding
+  outpoint is **required** here; these equalities are what
+  prevent a cosign from being redirected at an already-funded channel.) If
+  `channel_id` names no such channel, or either equality fails, the server
+  MUST NOT cosign any part of the package.
+* The server MUST NOT cosign a `channel-funding` destination except together
+  with its bridge in the same exchange — the no-bridgeless-VTXO rule (a
+  channel-funding output has no user spending clause without its bridge).
+  Equivalently: a request with a `channel-funding` destination
+  and no `channel_id` MUST be rejected (restated for the generic endpoint in
+  ARK #5).
+* The admission rules of "Open by upgrade" apply: the self-spend binding (the
+  `channel-funding` destination's `user_pubkey` equals the input's user key),
+  the resulting-depth bound, the runway floor, and the pinned `exit_delta`.
+* For a single-part package whose destination set is exactly the one
+  `channel-funding` output, the server SHOULD accept `use_checkpoint = false`
+  ("Open by upgrade"); every other shape follows its ordinary checkpoint
+  policy (ARK #5).
+
+Retries follow ARK #5's operation-identity rule, with the channel fields
+inside it: `channel_id` joins the part's operation identity, and in a
+re-signed session the bridge slot gets fresh nonces and a fresh partial
+exactly like the transfer slots. As everywhere (ARK #4 failure handling),
+the user MUST discard and regenerate its secret nonces for
+every slot — the bridge's included — on any retry; a secret nonce never
+participates in more than one signing session.
+
+**The downgrade split.** The downgrade ("Downgrade: close into Ark balance")
+also rides this endpoint, and adds *no* fields: a downgrade request is a
+plain ARK #5 request — no `channel_id`, no bridge nonce, since the split
+produces only `pubkey` outputs and there is no bridge to cosign — whose
+input carries the `channel-funding` policy. The server MUST accept such an
+input exactly when the request is the sanctioned split of a recorded
+completed close, verified per that section's admission rules against its own
+record of which channel the input backs, and MUST reject every other arkoor
+spend of a `channel-funding` input. Retries follow the operation-identity
+rule unchanged.
+
+## The Ark channel type
+
+*Extension. This section defines a dedicated channel type whose
+party-keyed HTLC claim delays order contested on-chain HTLC claims in the
+server's favor — on both HTLC directions — within a bounded response
+window. The keying is by party, not by script path, because the server is
+the one peer that can never force the contest to start early: it never
+unrolls (WD-16), so whichever branch is the server's must be the one that
+leads once a commitment confirms. A core-only implementation does not
+negotiate the type: its operating profile designates a stock channel type
+instead and restricts HTLC exposure by policy.*
+
+Under this extension a channel on Ark is not a vanilla BOLT channel: the
+parties negotiating the extension MUST use the dedicated **Ark channel
+type**. It is not a registered BOLT feature — Ark-aware
+peers agree on it out of band — but it is negotiated as an experimental feature
+pair, bits `400/401` (the reference's `ark_channel` feature): peers advertise
+the *optional* bit `401` in `init` (and `node_announcement`) — alongside the
+optional `zero_fee_commitments` bit, so the dependency bundle is recognizable —
+and at channel open the *required* bit `400` is the one set in the
+`channel_type`, alongside the `zero_fee_commitments` and `option_scid_alias`
+bits it implies. (It does NOT imply `static_remote_key`: the zero-fee
+commitment type does not carry that bit, unlike the legacy anchor types.) The pair is experimental — chosen clear of allocated BOLT
+bits — so the exact number is subject to change if the type is ever
+standardized. A server operating this extension MUST refuse to open a channel
+of any other type — the extension's instance of the core's designated-type
+rule ("Channel setup"; channel support on the Ark service is advertised by
+the `supports_channels` flag, see "Compatibility").
+
+The Ark channel type is a BOLT channel using the `zero_fee_commitments` option
+(BOLT #9 feature 40/41, specified in BOLT #3), with the Ark-specific deviations
+below. From `zero_fee_commitments` it takes — as plain BOLT, not Ark changes —
+version-3 (TRUC) commitment *and* HTLC transactions and a single `shared_anchor`
+pay-to-anchor output `OP_1 <0x4e73>` in place of any commitment fee, fee-bumped
+by CPFP at broadcast (anchor value per BOLT: `min(240 sat, the commitment's
+residual)`, any excess becoming on-chain fee). That is the same P2A and CPFP
+discipline the Ark exit transactions use (ARK #6). Everything else not listed
+below — the `to_local` / `to_remote` outputs, revocation and per-commitment key
+derivation, and the HTLC script structure apart from the inserted
+client-branch delays — is likewise unchanged BOLT and is referenced, not
+restated.
+
+An Ark channel is interoperable only if both peers reproduce the deviations
+below identically: a mismatch makes the exchanged signatures fail to verify and
+aborts the channel. The funding output is a stock BOLT-3 P2WSH 2-of-2 produced by
+the bridge transaction (see "The channel VTXO and the bridge transaction"), so it
+is **not** a deviation — the channel's two BOLT-3 funding pubkeys are ordinary
+Lightning keys (Actors and keys), and the commitment is structurally an
+ordinary `zero_fee_commitments` commitment **except for the HTLC output
+scripts below**, whose changed bytes change those outputs' P2WSH hashes
+(its obscured commitment number rides in `nLockTime`/`nSequence` as in
+BOLT-3 — the bridge, not the commitment's own input, carries the
+exit-delay CSV). The Ark-specific deviations are:
+
+* **Party-keyed HTLC claim delays.** On every commitment HTLC output, every
+  non-revocation branch that resolves to the **client** carries an extra
+  `<exit_delta> OP_CSV OP_DROP`; every branch that resolves to the
+  **server** carries no added CSV. Across the four templates — both HTLC
+  directions on both commitments, direct and second-stage forms alike —
+  that means: on a **server-offered** HTLC the success branch (the
+  client's preimage claim) is delayed and the timeout branch (the server's
+  reclaim) is baseline; on a **client-offered** HTLC the **timeout**
+  branch (the client's reclaim, additionally bound by its absolute CLTV as
+  in BOLT-3) is delayed and the success branch (the server's preimage
+  claim) is baseline. The revocation branch is unchanged and immediate —
+  justice gets no response window, deliberately — and the balance outputs
+  are untouched: they are uncontested, so there is nothing to order.
+
+  The base scripts are the plain BOLT-3 HTLC scripts, **not** the
+  `option_anchors` variants: `zero_fee_commitments` is its own channel
+  type, whose commitment and HTLC transactions are version 3, whose HTLC
+  signatures use `SIGHASH_SINGLE|ANYONECANPAY`, and whose baseline
+  HTLC-transaction input `nSequence` is 0 — there is no anchors-era outer
+  `1 OP_CSV` for the deviation to interact with. The deviation is the
+  inserted client-branch CSV alone.
+
+  Enforcement takes both forms the branches do. A **client** second-stage
+  HTLC transaction — HTLC-success on a server-offered HTLC, HTLC-timeout
+  on a client-offered one — is presigned with `nSequence = exit_delta`:
+  these are version-3 transactions, so any `nSequence` below `0x80000000`
+  is a real BIP-68 relative timelock, and the HTLC signatures commit to it
+  (BIP-143 covers the signed input's `nSequence` under
+  `SIGHASH_SINGLE|ANYONECANPAY`), so peers that disagree on a template
+  fail to verify each other's signatures. A **server** second-stage
+  transaction keeps the baseline `nSequence = 0`. A **direct** client
+  claim of a delayed branch MUST be a transaction of version 2 or later
+  whose HTLC input carries a height-type `nSequence` of at least
+  `exit_delta` with the BIP-68 disable flag clear — the BIP-112 spending
+  conditions the script imposes. Consensus enforces this without
+  cooperation; it is stated normatively because it is an implementation
+  delta: a stock Lightning implementation builds direct
+  counterparty-HTLC claims with a disabled relative locktime
+  (`0xFFFFFFFD`-style sequences), which the delayed branches make
+  consensus-invalid, so client claim construction must switch those
+  inputs to height-based sequences. Only the client side is affected:
+  the server's branches are baseline, and stock construction remains
+  valid for the party that cannot patch its counterparty. The CSV
+  nonetheless remains in the script even where a presigned transaction
+  exists: the contract is the **output's**, not the presigned
+  template's, because the direct spend forms have no peer signature to
+  pin them — and the server may be the party that publishes ("Server
+  recourse after the bridge confirms"). A client can confirm the bridge and then simply stop
+  cooperating, leaving the server to publish its own commitment to recoup
+  its balance and unresolved HTLCs; on the server's commitment the
+  client's competing claims are direct spends. Without the script CSV on
+  those branches, the server's own sanctioned recourse would recreate the
+  very race this type exists to remove.
+
+  The ordering this buys is a **response window**, not an unconditional
+  winner, and it is direction-specific. Let either commitment confirm at
+  height `H`, and let `T` be the HTLC's absolute CLTV. On a
+  **client-offered** HTLC the guarantee is unconditional once the server
+  holds the preimage: its success branch is mineable at `H + 1` while
+  the client's timeout waits for `max(T, H + exit_delta)`, so the server
+  leads by at least `exit_delta − 1` blocks however the close was timed.
+  On a **server-offered** HTLC the server's timeout is mineable at
+  `max(T, H + 1)` and the client's success at `H + exit_delta`: the
+  server leads — by `min(exit_delta − 1, H + exit_delta − T)` — exactly
+  when `T < H + exit_delta`, the late-close region where the CLTV
+  expires while (or before) the exit chain confirms. That is the region
+  an adversary can force, and the one the delay exists for. When the
+  commitment instead confirmed `exit_delta` or more before `T`, the
+  client's intended pre-CLTV claim window is simply open — the honest
+  path — and a contest first arising at `T` is the ordinary post-expiry
+  Lightning race, answered as in stock Lightning by the offerer acting
+  at `T` promptly (the standard fulfillment-deadline discipline), not by
+  script ordering: no relative timelock can hand the offerer a head
+  start at `T` on a long-confirmed commitment without also delaying the
+  receiver's honest pre-`T` claim. In both directions the window is an
+  obligation as much as a protection — the server's response must
+  confirm within it ("On-chain resolution under the delays").
+
+  These delays MUST equal the channel's pinned `exit_delta` (see
+  "`exit_delta` is pinned at open" below); both peers use that fixed value
+  rather than re-deriving it per update or negotiating it. BOLT-3 has no
+  per-party branch delays. They are a required construction parameter of
+  the Ark channel type, not an optional feature or a defaultable setting:
+  a node MUST NOT advertise, accept, or construct the Ark channel type
+  unless a nonzero delay equal to the pinned `exit_delta` is in force on
+  every client-resolving HTLC branch of both commitments, and it MUST
+  validate that binding before it advertises the type or cosigns the open.
+  Both the bridge `nSequence` and the HTLC-script delays MUST derive from
+  the single pinned value (see "`exit_delta` is pinned at open" below).
+  The party assignment is unambiguous by construction — the server is the
+  acceptor of every channel under this extension — and both peers MUST
+  reproduce the same four beneficiary-keyed templates when constructing or
+  recovering either commitment. Semantic branch placement is not enough:
+  byte-distinct insertions produce different P2WSH hashes, so the
+  templates below are **normative**. Each is the BOLT-3
+  non-`option_anchors` script whose revocation prefix (`OP_DUP OP_HASH160
+  <RIPEMD160(SHA256(revocationpubkey))> OP_EQUAL OP_IF OP_CHECKSIG`) is
+  byte-unchanged and elided here for readability only — it is part of the
+  script and its hash. `<pinned_exit_delta>` and `<cltv_expiry>` are
+  pushed with minimal script-number encoding. An implementation MUST pin
+  one serialized test vector per template before it advertises the type —
+  no such vectors exist yet, because no implementation of the type does.
+
+  *Server-offered HTLC, on the server's commitment (offered-HTLC
+  script):*
+
+  ```
+      OP_ELSE
+          <remote_htlcpubkey> OP_SWAP OP_SIZE 32 OP_EQUAL
+          OP_NOTIF
+              # To local node (SERVER) via HTLC-timeout transaction (timelocked).
+              OP_DROP 2 OP_SWAP <local_htlcpubkey> 2 OP_CHECKMULTISIG
+          OP_ELSE
+              # To remote node (CLIENT) with preimage.
+              OP_HASH160 <RIPEMD160(payment_hash)> OP_EQUALVERIFY
+              <pinned_exit_delta> OP_CHECKSEQUENCEVERIFY OP_DROP
+              OP_CHECKSIG
+          OP_ENDIF
+      OP_ENDIF
+  ```
+
+  *Server-offered HTLC, on the client's commitment (received-HTLC
+  script):*
+
+  ```
+      OP_ELSE
+          <remote_htlcpubkey> OP_SWAP OP_SIZE 32 OP_EQUAL
+          OP_IF
+              # To local node (CLIENT) via HTLC-success transaction.
+              OP_HASH160 <RIPEMD160(payment_hash)> OP_EQUALVERIFY
+              <pinned_exit_delta> OP_CHECKSEQUENCEVERIFY OP_DROP
+              2 OP_SWAP <local_htlcpubkey> 2 OP_CHECKMULTISIG
+          OP_ELSE
+              # To remote node (SERVER) after timeout.
+              OP_DROP <cltv_expiry> OP_CHECKLOCKTIMEVERIFY OP_DROP
+              OP_CHECKSIG
+          OP_ENDIF
+      OP_ENDIF
+  ```
+
+  *Client-offered HTLC, on the client's commitment (offered-HTLC
+  script):*
+
+  ```
+      OP_ELSE
+          <remote_htlcpubkey> OP_SWAP OP_SIZE 32 OP_EQUAL
+          OP_NOTIF
+              # To local node (CLIENT) via HTLC-timeout transaction (timelocked).
+              OP_DROP
+              <pinned_exit_delta> OP_CHECKSEQUENCEVERIFY OP_DROP
+              2 OP_SWAP <local_htlcpubkey> 2 OP_CHECKMULTISIG
+          OP_ELSE
+              # To remote node (SERVER) with preimage.
+              OP_HASH160 <RIPEMD160(payment_hash)> OP_EQUALVERIFY
+              OP_CHECKSIG
+          OP_ENDIF
+      OP_ENDIF
+  ```
+
+  *Client-offered HTLC, on the server's commitment (received-HTLC
+  script):*
+
+  ```
+      OP_ELSE
+          <remote_htlcpubkey> OP_SWAP OP_SIZE 32 OP_EQUAL
+          OP_IF
+              # To local node (SERVER) via HTLC-success transaction.
+              OP_HASH160 <RIPEMD160(payment_hash)> OP_EQUALVERIFY
+              2 OP_SWAP <local_htlcpubkey> 2 OP_CHECKMULTISIG
+          OP_ELSE
+              # To remote node (CLIENT) after timeout.
+              OP_DROP <cltv_expiry> OP_CHECKLOCKTIMEVERIFY OP_DROP
+              <pinned_exit_delta> OP_CHECKSEQUENCEVERIFY OP_DROP
+              OP_CHECKSIG
+          OP_ENDIF
+      OP_ENDIF
+  ```
+
+  The added script bytes change HTLC witness sizes and second-stage
+  weights, so implementations MUST recompute weight and fee constants
+  from the amended scripts rather than reusing stock values.
+
+  The same invariant binds a channel restored from persistence: a stored
+  scope whose client-branch delays are absent, zero, or too large for its
+  CLTV floor MUST NOT be resumed or offered new HTLCs — and the delays
+  cannot be repaired from current configuration, since the commitment
+  scripts they appear in are already signed. Force-closing the scope (or
+  keeping it fail-closed) is the only safe disposition.
+
+* **On-chain resolution under the delays.** The off-chain CLTV semantics
+  are unchanged, but no client branch of a confirmed HTLC output is
+  on-chain eligible before `confirmed_at + exit_delta`, and a client
+  timeout additionally waits for its absolute CLTV — its threshold is
+  `max(cltv_expiry, confirmed_at + exit_delta)`. Monitoring,
+  payment-failure reporting, persistence, and claim pruning MUST use that
+  contract: an HTLC is not terminal merely because its CLTV passed, and a
+  known preimage MUST be retained until its output is conclusively spent.
+  The window also obligates the server: the response MUST confirm inside
+  it, after which the contest is an ordinary fee race again — so a server
+  operating this extension MUST run a persistent chain watcher and hold
+  confirmed fee inputs with rebroadcast and replacement logic for its
+  claims. Each claim MUST be broadcast promptly at its maturity — a
+  preimage claim on a client-offered HTLC at the commitment's
+  confirmation, a timeout claim on a server-offered HTLC at
+  `max(T, H + 1)` (its CLTV, or the block after confirmation, whichever
+  is later) — and the response window is not slack: where the competing
+  branch is already mature (a server-offered HTLC whose commitment
+  confirmed `exit_delta` or more before its CLTV), there is no window at
+  all, only the ordinary post-expiry race, and every block of delay past
+  maturity is surrendered lead. The shared P2A anchor belongs to the commitment, not to the HTLC
+  resolutions, which bring their own fees; and while the commitment is
+  unconfirmed, TRUC's one-unconfirmed-child rule means claims cannot fan
+  out beneath it — claim scheduling MUST respect that topology and the
+  TRUC child-size limit rather than assume arbitrary parallel HTLC
+  children. A **trimmed** HTLC has no output and therefore no branch to
+  order: dust-exposure bounds (`max_dust_htlc_exposure_msat`-style) MUST
+  be retained under this extension, and a deployment claiming no
+  forwarded collect-leg loss MUST NOT forward an HTLC that is trimmed
+  from either commitment. Finally, the delayed client timeout is safe to
+  impose only because clients under this extension are endpoints: a
+  client MUST NOT forward HTLCs over an Ark channel — a deployment that
+  wants client forwarding must first re-derive the timing profile, since
+  a delayed refund on a forwarding node becomes upstream risk.
+
+* **HTLC CLTV budget.** This budget is the **client receiver's**: it
+  prices the serial chain a receiver who can unroll climbs, and the
+  server never climbs it — it cannot initiate the unroll. Its enforcement
+  point is **per-HTLC acceptance**, and its advertisement is the
+  invoice's `min_final_cltv_expiry_delta` (BOLT 11): a client receiver
+  MUST reject an incoming HTLC whose remaining CLTV budget is below
+  `2 * pinned_exit_delta + channel_max_vtxo_exit_depth +
+  cltv_safety_margin`, and MUST NOT issue an invoice advertising less.
+  The channel-level `cltv_expiry_delta` (BOLT 7) is a *forwarding*
+  parameter, not this budget's carrier — clients under this extension do
+  not forward, and the server's forwarding delta follows the core floor
+  ("The force-close deadline"). Resolving a received HTLC on-chain crosses **two**
+  `pinned_exit_delta` delays in series: first to get
+  the **commitment** confirmed — force-closing *through* the VTXO exit takes up to
+  `channel_max_vtxo_exit_depth` genesis levels (ARK #0) plus the bridge, whose
+  input is time-locked `pinned_exit_delta` — and then, on the confirmed
+  commitment, the **client-claim delay** (above) holds the preimage claim a
+  further `pinned_exit_delta`. Both must complete before the HTLC's absolute CLTV (after
+  which the offerer's timeout path opens), which is why `pinned_exit_delta` appears
+  twice. The serial chain a force-close climbs before the preimage claim is valid:
+
+  ```
+     force-close begins
+          │  ≤ channel_max_vtxo_exit_depth genesis levels (each ~1 block)
+          ▼
+     channel VTXO output on-chain
+          │  pinned_exit_delta    (bridge input nSequence CSV)
+          ▼
+     bridge confirmed → commitment confirms (no extra delay of its own)
+          │  pinned_exit_delta    (client-claim delay CSV)
+          ▼
+     HTLC-success spend valid  ── must land before the HTLC's absolute CLTV ──
+  ```
+
+  Worked example (defaults `pinned_exit_delta = 144`,
+  `channel_max_vtxo_exit_depth = 16`): the
+  floor is `2·144 + 16 + cltv_safety_margin = 304 + cltv_safety_margin` blocks
+  (~2.1 days before the buffer; the reference sizes the margin at 18 blocks,
+  for a 322-block floor). The common error is to budget only the on-commitment
+  claim delay — `1·pinned_exit_delta + cltv_safety_margin` — and fold the rest into the margin;
+  that under-counts by a whole `pinned_exit_delta + channel_max_vtxo_exit_depth` and lets the
+  offerer's timeout win the on-chain race. `cltv_safety_margin` is the ordinary
+  Lightning confirmation buffer, but
+  for an Ark channel it MUST be sized larger: it absorbs confirmation variance
+  across the **whole serial chain** a force-close climbs — up to
+  `channel_max_vtxo_exit_depth` genesis levels, then the bridge, the commitment, and the
+  delayed success claim — each budgeted at a single block in the floor but any of
+  which can run longer under fee pressure (the non-Ark race is only
+  commitment-then-claim).
+
+  The **server's** acceptance rule is watch-and-claim, not this budget:
+  its claim branches are baseline once either commitment confirms, and
+  its safety is the response window above — which is why
+  `pinned_exit_delta` MUST be sized to cover the server's watch latency,
+  broadcast, confirmation, and reorganization margin after either
+  commitment appears. The core's forwarding delta floor ("The force-close
+  deadline") remains the room for the preimage to *arrive* on the
+  incoming leg; it is not a substitute for that sizing. The exit-derived terms come from
+  the channel's pinned `exit_delta` (below) and from its pinned
+  `channel_max_vtxo_exit_depth`, so both peers compute the same floor given the
+  same buffer; each enforces it from its own configuration, not on the wire.
+  Because these values are pinned per channel ("`exit_delta` is pinned at
+  open"), the floor is a **per-channel** quantity. A receiver that commits to a
+  single CLTV floor not bound to
+  one channel — for example the `min_final_cltv_expiry_delta` of a BOLT-11 invoice
+  payable over any of its channels — MUST therefore advertise the **maximum**
+  floor across the channels it could receive on, so the budget holds whichever
+  channel the payment lands on (the value is fixed when the invoice is issued). A
+  payment that carries *no* receiver-committed CLTV floor — a **spontaneous
+  (keysend) payment**, which has no invoice `min_final_cltv_expiry_delta` —
+  can still be *checked*: the per-HTLC acceptance rule above applies to
+  every incoming HTLC, keysend included, so safety is never the issue.
+  What keysend lacks is the advertisement — its sender has no way to learn
+  the required floor, so a keysend either arrives over-budgeted by luck or
+  fails the check blind, inviting blind retries. The reference therefore
+  rejects keysend HTLCs on Ark channels as **policy** (a clean refusal
+  over blind retries; it fails them back), and keysend is unsupported
+  under this extension for now. Accepting floor-compliant keysends is
+  future work, pending review of the sender-experience and probing
+  implications — not of the budget, which the per-HTLC check already
+  enforces.
+  `channel_max_vtxo_exit_depth`
+  is also the upper bound the budget assumes on the **channel VTXO's own** exit
+  depth — the number of genesis levels a force-close must climb: a channel VTXO
+  is an upgrade output ("Open by upgrade"), and the client MUST refuse an
+  upgrade whose resulting depth would exceed it ("Open by upgrade"), since a
+  deeper exit chain would overrun the budget.
+
+  This budget **extends the core's floor** `F` ("The force-close deadline"):
+  the two share the genesis-plus-bridge prefix
+  (`channel_max_vtxo_exit_depth + pinned_exit_delta`), and the budget adds
+  the client-claim delay's second `pinned_exit_delta`, served on the confirmed
+  commitment. The per-HTLC threshold under this extension is therefore
+  `max(F, budget)` — the budget is the active term exactly when it is the
+  larger, the two margins being set independently — never their sum, which
+  would double-count the shared prefix.
+
+  Every timing-profile calculation MUST use checked arithmetic in a type wider
+  than its encoded fields. As a **profile restriction**, the complete floor
+  `2 * pinned_exit_delta + channel_max_vtxo_exit_depth + cltv_safety_margin`
+  MUST be no greater than `65535`: the invoice's
+  `min_final_cltv_expiry_delta` is itself variable-length (BOLT 11), but
+  components of the floor ride `u16` carriers elsewhere — the channel-level
+  `cltv_expiry_delta` where the server forwards, and implementation
+  configuration fields — and one representable bound for the whole profile
+  is simpler and safer than per-carrier exceptions. A node MUST NOT
+  advertise, open, or accept an Ark channel whose complete floor exceeds
+  that bound or whose configured CLTV floor is smaller. An implementation that enforces the floor's
+  terms in separate layers MUST still check the complete floor before the
+  channel is enabled. Saturating an overflowing floor is non-conforming: it
+  silently admits HTLCs with less time than the on-chain path requires.
+
+* **Virtual funding.** The channel uses manual funding at zero confirmation
+  depth — it becomes usable without its funding (bridge) transaction appearing
+  on-chain (see "Trust assumptions").
+
+**`exit_delta` is pinned at open.** A channel's `exit_delta` — the value on the
+bridge input's `nSequence`, in the HTLC scripts' client-claim delays, and in the
+CLTV budget above — is fixed **once, at open** — the input VTXO's decoded `exit_delta`
+("Open by upgrade") — and is
+thereafter a fixed parameter of the channel. Both parties MUST store it (with the
+channel's other parameters, keyed by `channel_id`) and use the stored value for
+every later commitment; neither re-reads
+`vtxo_exit_delta` from ark info for an existing channel. No wire field carries
+it. Cross-peer agreement is enforced at open by the **bridge cosign**: the
+`musig(A, S)` key-path sighash commits the bridge input's `nSequence`, so peers
+holding different values fail to verify each other's partial signatures and the
+open aborts with nothing on-chain. The **HTLC-script delays are not what
+catch a disagreement**: the initial commitment carries no HTLC outputs, so
+nothing signed at establishment commits to them, and a divergence
+confined to them — one peer's client-claim delay drifting from its own bridge
+`nSequence` — stays hidden through a successful open and surfaces only at the
+first HTLC's commitment exchange, whose signatures fail to validate and
+force-close an established channel *after* the open's registration point of
+no return. An implementation MUST therefore derive the HTLC-script
+delays and the bridge `nSequence` from the single pinned value rather than
+configuring them independently: the protocol re-verifies the bridge copy at
+every cosign, but a split between a peer's own two copies is caught by nothing
+until that first-HTLC force-close.
+
+**The channel timing profile is pinned at open.** At open both parties MUST
+record the pair `(pinned_exit_delta, channel_max_vtxo_exit_depth)`, where
+`channel_max_vtxo_exit_depth` is the maximum VTXO exit depth on which this
+channel's CLTV floor was based. The channel's CLTV base is
+`2 * pinned_exit_delta + channel_max_vtxo_exit_depth`; a receiver MUST retain
+the floor committed in each outstanding invoice and MUST NOT later apply a
+smaller floor. Ark info is an admission policy for new channels, not a source of
+timing parameters for an existing channel.
+
+Every timing decision for a backing scope binds to values fixed when that scope
+was issued: the absolute `expiry_height` and actual exit depth decoded from the
+VTXO itself, and the channel's pinned timing profile; a configuration change
+cannot raise either bound for an existing channel. HTLC admission, invoice
+validation, the stop-forwarding threshold, and force-close scheduling MUST
+use those scope-fixed values together with the real chain height, across
+restarts. They MUST NOT recompute expiry as anchor/root height plus a current
+`vtxo_expiry_delta`, or substitute a current ark-info exit parameter or depth
+bound.
+
 ## Refresh
+
+*Extension. This section and "The teleport protocol" define in-place renewal
+of a channel's backing VTXO. A core-only implementation omits them: a
+channel's backing keeps its issuance expiry, and the pre-expiry remedies are
+the downgrade — followed by an ordinary ARK #4 refresh of its outputs and a
+re-open — or unilateral exit.*
 
 A channel VTXO expires like any other, and its exit chain grows no shallower
 over time. **Refresh** replaces it with a fresh channel VTXO before expiry,
 resetting both, while preserving the channel and its balance. It is a round
 (ARK #4): the old channel VTXO is forfeited and a new `channel-funding` VTXO
-is issued as a round leaf.
+is issued as a round leaf. The new scope's chain anchor is the round
+transaction (the tree root), and the virtual funding re-anchors there on
+promotion ("Trust assumptions").
+
+Refresh is the third seam where a channel touches the generic Ark flows —
+alongside the core's upgrade and downgrade — and it restores the in-place
+escape the core lacks: with this extension the user SHOULD refresh, which
+resets `expiry_height`, well before the core's force-close deadline, and the
+cooperative lead of "The force-close deadline" prefers a refresh over a
+close. Like the cooperative close, refresh requires a responsive server. The
+next refresh also does what the upgrade deliberately does not: it resets the
+scope's expiry and depth, and it satisfies an arkoor-received input's refresh
+recommendation (ARK #5) in place, making the core's pre-upgrade round
+unnecessary. A channel too deep to split regains its cooperative settlement
+here: a client pursuing cooperative settlement of an over-depth channel
+MUST refresh first — resetting depth — then downgrade
+(refresh-then-downgrade); the core's split-headroom admission becomes a
+convenience rather than the only guarantee. A refresh quiesces the channel —
+needing no *pending* (uncommitted) HTLC updates in flight — and **carries**
+committed HTLCs across to the new scope, like a splice ("The teleport
+protocol"), so a committed HTLC does not by itself block a refresh; what
+blocks it is an unresponsive peer, in which case the node force-closes per
+the core's deadline.
+
+Refresh also composes with the core's close and watch machinery, with the
+**forfeit** in the split's role. Until a refresh's forfeit (as until the
+split's registration), the user can settle a closed channel without the
+server; once the VTXO is forfeited in a refresh round (as once the split is
+registered), the closing transaction and the commitment can no longer reach
+the chain — the retained forfeit spends the channel VTXO output with no
+timelock, ahead of the bridge's `exit_delta`, and the teleport's promotion
+retires the old scope by the same argument — and the enforcing watch is the
+forfeit-watch duty (ARK #4), the split-response watch's counterpart. The
+upgrade's parent-exit duty ("Registration and the parent-exit response")
+does not end at a refresh: after its forfeit, the forfeited output can be
+actualized for the forfeit claim only through the same retained
+transactions — the duty's conclusive-spend condition reads "spent by the
+retained transfer or a forfeit-driven actualization" — and discarding them
+at forfeit would let the input's leaf outrace the forfeit.
 
 ### Reused from ARK #4
 
@@ -757,6 +1773,22 @@ invalid. For each affected channel, the server MUST identify exactly one current
 old backing; a stale backing, an unknown mapping, or two different current
 backings for the same channel is an admission failure, not something deferred to
 leaf cosigning or teleport.
+
+**The pinned timing profile governs the new scope.** A refresh is valid only
+if the decoded new VTXO has `exit_delta == pinned_exit_delta` and actual exit
+depth `<= channel_max_vtxo_exit_depth` ("The Ark channel type"): a channel
+VTXO issued by refresh is a round leaf, and the client MUST refuse a refresh
+whose issued leaf would exceed the pinned depth — a deeper exit chain would
+overrun the CLTV budget. The refresh MUST build the new bridge at the pinned
+`exit_delta`, and the server, reconstructing that bridge from `channel_id`,
+MUST use the channel's stored value rather than its current ark-info value;
+if the server's `vtxo_exit_delta` has since changed and it will not cosign at
+the pinned value, the refresh fails and the channel must be closed and
+reopened. A refresh reuses the pinned timing profile, so the channel's CLTV
+floor does not move, and refresh scheduling MUST use the scope-fixed values
+exactly as the core's timing decisions do. A peer unable to issue or cosign a
+scope meeting the stored profile MUST refuse refresh, leaving the client to
+refresh earlier or force-close.
 
 Accepting the participation and establishing its refresh gates are one
 admission decision: a participation is either accepted with a gate for every
@@ -905,6 +1937,59 @@ The forfeit is the point of no return.
             (see "Teleport recovery"). The channel stays open throughout (no
             ChannelReady is emitted).
 ```
+
+### `leaf_vtxo_cosign` (ARK #4)
+
+Request (channel refresh): the ARK #4 fields — `vtxo_id`, user `pub_nonce` (bound
+to the leaf sighash) — plus, for a channel leaf: `channel_id` (32 bytes, the
+BOLT-2 channel id of the channel being refreshed) and `bridge_pub_nonce` (the
+user's nonce for the new bridge's key-path sighash). Both are absent for a non-channel
+leaf. Response: as ARK #4 (server `pub_nonce`, `partial_sig`, first-signer
+one-shot), extended with the server's bridge `pub_nonce` + `partial_sig`.
+
+The server reconstructs and cosigns both the new leaf exit
+tx and the new **bridge** in this one exchange, using the funding keys it already
+holds for `channel_id` — the new bridge reuses the channel's existing funding keys
+(it does not rotate them; see "The teleport protocol"). If `channel_id` names no
+channel it knows (with a funding key it controls), it MUST NOT cosign. For a leaf
+whose policy is `channel-funding`, `channel_id` and `bridge_pub_nonce` MUST be
+present, and the server MUST NOT cosign such a leaf without also cosigning its
+bridge — the no-bridgeless-VTXO rule of the open cosign, above. The server
+also independently learns the channel from the forfeited input on the round
+participation and from `teleport_init`. It MUST ensure the refresh is a genuine,
+value-conserving re-pointing of the named channel — the channel's current backing
+VTXO is forfeited in the round (round value-conservation already guarantees the
+new funding leaf is covered by the forfeited value) — and MUST refuse to cosign a
+bridge that would move *another* channel's backing VTXO into this channel's
+funding 2-of-2. It need NOT atomically pin the specific new leaf `vtxo_id` to the
+specific forfeited outpoint: value conservation plus the channel↔forfeit
+correlation already prevent a free or cross-channel funding, and a client
+re-pointing its own channel onto a different leaf it owns (value-conserved, not
+another channel's) is not an attack. This looser binding is deliberate — it leaves
+room for future refresh extensions that combine channels (several forfeited VTXOs
+re-pointed into one channel, or splices), which a strict 1:1 forfeit↔leaf pin
+would foreclose. The participation gate of "Refresh admission and the server
+gate" is different: it pins the exact **old** backing and participation for every
+affected channel, not a particular new leaf at admission. For the selected
+`vtxo_id`, however, the server MUST decode the
+actual VTXO and reconstruct the bridge only from that VTXO's actual
+`channel-funding` output, including its point, scriptPubKey, value, expiry, and
+pinned `exit_delta`; it MUST NOT reconstruct from response metadata.
+
+### `submit_round_participation` response (ARK #4)
+
+The ARK #4 response carries `unlock_hash` (32 bytes). For a channel-refresh
+participation the server MAY instead return a cap in its place:
+
+| Field | Type | Presence |
+|---|---|---|
+| `unlock_hash` | 32 bytes | accepted — identifies the participation (ARK #4) |
+| `counter_max_issuable_sat` | u64 sats | capped — the maximum `channel-funding` output the server will issue when it declines the requested amount (at most `V_old − fee − X`, folding in the required fee and its liquidity withdrawal `X`; see "Server liquidity adjustment") |
+
+Exactly one of the two is present. Requirements (participant): on receiving
+`counter_max_issuable_sat` (and no `unlock_hash`), the participant MUST resubmit
+requesting a `channel-funding` output no larger than the cap, or abandon the
+refresh; it MUST NOT proceed at the original amount.
 
 ## The teleport protocol
 
@@ -1108,723 +2193,109 @@ watch set, gate, or scope record after a restart MUST leave that channel
 fail-closed rather than recreate an empty state or resume without
 reconciliation.
 
-## The close
+## Implementation profiles
 
-A cooperative channel close has two halves, in strict order. First the
-channel is closed at the Lightning layer by the standard BOLT-2 close —
-`shutdown`, HTLC drain, closing negotiation — which terminally fixes the
-final balances. Then the close is settled at the Ark layer by the
-**downgrade** ("Downgrade: close into Ark balance", below): the sanctioned
-split of the channel VTXO into plain `pubkey` VTXOs matching those balances.
-An on-chain exit, when wanted, is the ordinary ARK #7 offboard of those
-`pubkey` VTXOs afterwards — nothing channel-aware remains in it. (The
-retired channel-offboard variant settled the close by a direct payout and a
-forfeit of the channel VTXO under an amended balance rule; the downgrade
-subsumed it.)
+A deployment operates this document at a declared **profile**: the set of
+layers it implements, plus the parameters the core leaves to designation.
+The peers of one Ark service run the same profile, and the layering contract
+("Layers") guarantees each profile below is complete as stated.
 
-The close is the ordinary BOLT-2 closing flow (referenced, not restated):
-either peer MAY initiate with `shutdown` — the server included, e.g. to wind
-down an idle channel, though the Ark leg that follows is always the user's to
-drive. From `shutdown` on, no new HTLC is offered while in-flight HTLCs
-resolve normally; once the channel is empty of HTLCs, closing negotiation
-(`closing_signed`, or `closing_complete` / `closing_sig` under
-`option_simple_close`; the reference uses `closing_signed`) produces a fully
-signed **closing transaction** spending the funding output. Channel
-quiescence (BOLT-2 `stfu`, the teleport's tool) plays no part: `stfu` cannot
-be sent while updates are pending, forbids the very settles a drain needs,
-does not survive disconnection, and force-disconnects after 60 seconds with
-HTLCs still committed — it freezes an *operating* channel for a moment,
-whereas `shutdown` drains a *terminating* channel monotonically, for as long
-as that takes, surviving reconnection via `channel_reestablish`
-retransmission. The freeze the settlement needs is not an extra protocol at
-all; it is the close itself.
+### Profile: core-only (first release)
 
-The closing transaction is negotiated exactly per BOLT-2, but its job here is
-not to be broadcast: the funding output it spends is the bridge's output,
-which exists only in the off-chain exit chain (virtual funding), so on the
-cooperative path it can never confirm, and neither side need relay it (a
-stack that broadcasts it unconditionally is harmless — the transaction spends
-an outpoint the chain has never seen). Its jobs:
+The core lifecycle with no extensions. Its designations, and the obligations
+that stand in for the extensions' protections:
 
-* **The balance agreement.** Completing the negotiation commits both peers,
-  by signature, to the same pair of final balances — a peer that disagreed
-  would produce a closing signature that fails to verify, aborting the close
-  before the Ark flow rather than surfacing inside it. The split's balance
-  verification ("Downgrade: close into Ark balance", Admission) is checked
-  against this close-fixed figure, not a live channel-state read,
-  and the figure cannot go stale: the close is terminal, so no later update
-  can move it.
-* **The user's fallback between close and settlement.** Until the split's
-  registration (or, at a refresh, the forfeit), the
-  user can settle the closed channel without the server: exit the VTXO
-  (ARK #6), broadcast the bridge, and spend the funding output with the
-  closing transaction in place of the commitment — the better tail, since its
-  outputs carry no `to_self_delay` and the channel is empty of HTLCs by
-  construction (the final commitment, never revoked, remains valid too). The
-  closing transaction is an ordinary v2 transaction broadcast only after the
-  bridge confirms, so TRUC's unconfirmed-ancestry rules never see it; a stale
-  negotiated fee is repaired by CPFP of the user's own output.
-* **Nothing, after the settlement.** Once the split is registered (or the
-  VTXO forfeited in a refresh round), the closing transaction — exactly like
-  the commitment — can no longer reach the chain: the retained split
-  transaction (or forfeit) spends the channel VTXO output with no timelock,
-  ahead of the bridge's `exit_delta` ("Where the race is decided"; the same
-  argument retires the old scope after a teleport — see "The teleport
-  protocol"). Holding a signed closing transaction therefore gives the user
-  no post-settlement claim; enforcing that is the split-response watch (or
-  the forfeit-watch duty).
+* **Channel type.** The designated type is `zero_fee_commitments` with
+  `option_scid_alias` — and NOT `static_remote_key`, which the zero-fee
+  commitment type does not carry (only the legacy anchor types do).
+  `option_scid_alias` is required because no wire reference may ride a
+  synthesized SCID, and since only the funder can put the bit in the
+  proposed type, the acceptor requiring it is what enforces the funder's
+  obligation. v3/TRUC commitments and the single shared P2A anchor
+  put the whole force-close family under one fee model (CPFP over P2A,
+  ARK #6), and no `update_fee` runs against a funding that cannot be
+  re-signed. The server MUST refuse any other type ("Channel setup").
+* **Split headroom is mandatory.** The core's SHOULD ("Open by upgrade",
+  Depth) is a MUST here: without refresh, a channel VTXO too deep to split
+  has no cooperative settlement, ever — the user would be forced into an
+  on-chain unroll the server would happily have avoided by refreshing the
+  downgraded outputs in an ordinary round. Upgrade admission MUST bound the
+  resulting depth at `channel_max_vtxo_exit_depth − 2`. And because the
+  split's eligibility is checked against the server's **live**
+  `max_vtxo_exit_depth` (ARK #2) — which the pinned profile cannot
+  override — a server MUST NOT lower that bound below what any live
+  channel's split needs: it MUST refuse the configuration change or require
+  those channels closed first. The headroom bound presupposes
+  `max_vtxo_exit_depth ≥ 2`, which the server MUST enforce as a
+  configuration invariant.
+* **Anchor reorganizations fail closed.** The chain feed withdraws a virtual
+  funding confirmation only on a genuine (deep) reorganization of its
+  anchor — anchors are typically deeply confirmed by open time — and the
+  stock force-close that follows is the accepted disposition ("Trust
+  assumptions"); suspending and resuming an unconfirmed-anchor channel is
+  not attempted.
+* **Expiry is a treadmill.** A channel cannot outlive its backing's
+  `expiry_height` in place. The supported lifecycle is: downgrade at the
+  cooperative lead ("The force-close deadline"), refresh the resulting
+  `pubkey` VTXOs in an ordinary round, and re-open by upgrade. Clients
+  SHOULD schedule the downgrade proactively.
+* **HTLC exposure is bounded by policy, not by script.** Without the type
+  extension's party-keyed claim delays, an expired HTLC's on-chain
+  timeout-versus-preimage contest is a fee race with no consensus-ordered
+  head start — including the server's own preimage claims on
+  client-offered (collect-leg) HTLCs, where the offerer chooses when the
+  contest can begin. The core's floor `F` removes the deterministic losses; the
+  residual race is bounded operationally — conservative per-HTLC value caps
+  and in-flight limits on channels the server forwards over, with the
+  forwarding `cltv_expiry_delta` at or above `F`. Forwarding is otherwise
+  unrestricted (payments between two users of one service require it), and
+  this exposure ends where the type extension is adopted.
+* **Actualized-then-abandoned channels.** A server that carries no channel
+  balance (a lifecycle-only deployment: `push_msat = 0`, payments not yet
+  enabled) MAY leave a client-actualized channel open indefinitely rather
+  than force-close it ("Server recourse after the bridge confirms") — there
+  is nothing to recoup, and the cost is the held monitor. The moment a
+  deployment carries balance or forwards HTLCs, that recourse is
+  load-bearing: the server MUST operate an idleness/deadline policy that
+  force-closes actualized channels it can no longer afford to leave open,
+  with fee funding for the commitment's CPFP.
+* **Known conformance deviations.** (i) The attestation's operation-identity
+  binding of `channel_id` (ARK #5) is not enforced; a tampered `channel_id`
+  is caught at partial-signature verification instead ("Messages"), and the
+  residual is a low-severity griefing vector requiring a man-in-the-middle.
+  (ii) A byte-identical duplicate cosign request may be re-signed with fresh
+  nonces rather than replayed-or-rejected (ARK #5): fresh-nonce re-signing
+  leaks nothing, and that rule's protection targets a client completing a
+  session twice, which a conforming client never does.
 
-Requirements:
+### Profile: extended
 
-* The user MUST complete the close — hold a fully signed closing transaction
-  paying its final balance (less any closing fee it pays) — before the
-  split's cosign request. This is the exit-before-forfeit discipline of ARK #4:
-  the closing transaction is the exit story the user falls back on if the
-  server stops cooperating after the close.
-* The server MUST NOT cosign a split of a channel VTXO whose channel has
-  not completed the close — before that point there is no fixed balance to
-  verify the destinations against ("Downgrade", Admission). It MUST retain
-  the close outcome (the final balances, keyed to the channel's backing
-  VTXO) until the VTXO is resolved — split, forfeited, or expiry-swept —
-  since the settlement may arrive arbitrarily later, after its Lightning
-  stack has forgotten the channel.
-* The close outcome MUST survive anything that happens after the close
-  completes — a crash, a restart, or however the implementation routes its
-  close notifications — until the backing VTXO is resolved. For the server the
-  outcome is the close-fixed balances, bound to the exact channel and backing
-  VTXO; for the user it additionally includes the fully signed closing
-  transaction, which MUST be retained from the moment its final signed form
-  exists. Whether the settlement is driven interactively, by a background
-  task, or by recovery, all of them MUST see the same recorded outcome —
-  beginning the Ark leg MUST NOT depend on having personally observed the
-  close complete. A party that cannot record the outcome MUST NOT report the close
-  complete or begin the Ark leg, and MUST keep the channel fail-closed rather
-  than lose the outcome.
-* A completed cooperative close is not a force-close: automatic recovery MUST
-  NOT react to one by starting the unilateral exit or by discarding the close
-  outcome. The user retains the unilateral path as a fallback and may take it
-  on explicit policy (for example server failure or the expiry deadline), but
-  a failed or delayed settlement remains retryable from the recorded close
-  outcome first.
-* A completed close disappears from the live Lightning channel set, but it does
-  not disappear from expiry scheduling. Until the settlement is past its point
-  of no return — for the downgrade, registration of the complete split
-  ("Registration and the split response") — the client MUST hold the closed
-  channel and backing scope to the same force-close deadline as an operating
-  channel; if no settlement is potentially final by that deadline, it MUST
-  begin the unilateral fallback in time to confirm the bridge before expiry.
-* The closing fee (BOLT-2) is deducted from closing outputs only — under
-  `closing_signed` from the funder's (the user's: it opened the channel),
-  under `option_simple_close` from each closer's own. It never enters the
-  settlement, which is verified against the pre-fee final balances; the
-  user SHOULD negotiate it low, since the closing transaction is broadcast
-  only in the fallback, where it can be fee-bumped at use.
-* The unilateral fallback MUST be able to confirm at current feerates: either
-  the closing transaction is submitted with a fee-paying child spending the
-  user's shutdown output, or the latest non-revoked commitment is used with
-  its Lightning anchor/package path instead. A retained low-fee closing
-  transaction with neither fee path is not a complete fallback, and
-  re-selecting it unchanged makes no progress.
-* **A failed fee negotiation wedges the close; policy should make it
-  unfailable.** Under `closing_signed`, disjoint fee expectations leave the
-  channel closing-but-never-closed: `shutdown` has already barred updates
-  (and a shutdown-pending channel cannot refresh), no close record exists,
-  and no settlement can begin — the recourse is the unilateral fallback
-  under "The refresh / force-close deadline", via the commitment path (no
-  closing transaction was ever signed). The negotiation is not worth
-  failing: the fee buys nothing in the cooperative outcome — it is deducted
-  only from the fallback artifact, and every settlement is verified against
-  the pre-fee balances — so the non-funder (the server, in every channel of
-  this document) SHOULD accept any fee at or above its relay floor, and the
-  funder SHOULD prefer conceding upward to wedging, since its fallback
-  retains the commitment alternative regardless. `option_simple_close`,
-  where each closer pays from its own output under unconditional
-  signatures, removes the negotiation — and this failure mode — entirely,
-  and SHOULD be preferred once available.
-
-The close is a one-way door: `shutdown` commits the channel to closing
-(BOLT-2), and there is no abort-and-resume — unlike a refresh, whose teleport
-can abort back to normal operation. Before the split's cosign request may
-have been sent, a settlement failure leaves the channel closed but loses
-nothing — balances stay fixed, the downgrade can be retried, and the
-unilateral fallback remains available. What the close does not extend is
-expiry: while no settlement is completing, the client MUST begin fallback in
-time to confirm the bridge before expiry ("The refresh / force-close
-deadline"). The downgrade's own point of no return and recovery are specified
-in its section; past it, the old scope MUST NOT be broadcast.
-
-## Downgrade: close into Ark balance
-
-A **downgrade** is the upgrade run in reverse: a cooperative close whose
-settlement stays off-chain: the cooperative close's two halves ("The
-close"), in the same strict order — first the standard BOLT close terminally
-fixes the final balances; then the
-close is settled at the Ark layer by an out-of-round **split** (ARK #5): a
-single-part transfer that spends the channel VTXO into plain `pubkey` VTXOs
-matching the close-fixed balances — the user's to `pubkey(A)`, the server's
-to `pubkey(S)`. The user's funds re-enter its ordinary Ark balance with no
-round to wait for and no on-chain footprint; the commitment, the bridge, and
-the closing transaction all lose their roles once the split is registered —
-what stands watch from then on is the response duty below. Like the
-upgrade, the downgrade adds
-no wire fields at all: the split is a plain ARK #5 request, distinguished
-only by its input's `channel-funding` policy, and the server identifies the
-channel from its own record of which VTXO backs it — exactly as the refresh
-learns the channel from the forfeited input.
-
-```
-   channel VTXO output: cosign taproot (musig(A,S), S, expiry)   [old chain
-        │  (checkpoint tx, per the server's checkpoint policy —   and anchor,
-        │   spends by key path, nSequence = 0, ahead of the       unchanged]
-        ▼   retired bridge's exit_delta)
-   checkpoint outputs
-        │  (arkoor transactions)
-        ▼
-   pubkey(A) VTXO: the user's final balance   ·   pubkey(S) VTXO: the server's
-```
-
-### The split
-
-The split is a standard ARK #5 transfer — checkpoint machinery, balance,
-dust, and signing rules all unchanged — shaped by the close it settles:
-
-* **One part, the backing VTXO.** The split MUST be a single-part package
-  whose input is the closed channel's backing VTXO. Mixing other inputs
-  would make the balance attribution ambiguous; the restriction costs
-  nothing, since the
-  resulting `pubkey` VTXOs batch freely with the user's other funds from the
-  next operation on.
-* **Destinations are the close, restated.** Every destination MUST carry the
-  `pubkey` policy with `user_pubkey` equal to `A` (the channel VTXO's user
-  key — the requester is the arkoor sender, exactly the upgrade's self-spend
-  binding) or to `S` (the server pubkey), and the per-key totals MUST equal
-  the final balances fixed by the completed close, before any closing-fee
-  deduction — the closing fee is never paid, since the closing transaction is
-  broadcast only in the fallback. **The sub-satoshi remainder.** Lightning
-  balances are in millisatoshis, and the channel VTXO's value is a whole-sat
-  amount, so the two msat balances sum to `V × 1000` exactly but their
-  individual millisat remainders sum to either `0` or `1000`. Each side's sat
-  total is its close-fixed balance floored to whole satoshis; when the two
-  floors fall one satoshi short of `V` (the balances carried a sub-sat
-  remainder, which a BOLT close would drop to the closing fee), that single
-  satoshi MUST be added to the user's `pubkey(A)` total. The destination
-  amounts then sum to `V` exactly, so ARK #5's exact-balance rule holds with
-  no remainder; the odd satoshi favors the user, and the server MUST verify
-  the split on this same floor-plus-remainder basis. A side whose balance
-  floors to zero (and receives no remainder) gets no output. The rule is over
-  per-key *totals* — the summed value to each key, not a count of wire
-  entries — so ARK #5's dust isolation, which may split one side to lend the
-  combined isolation output its floor, composes with it (that split re-routes
-  value but moves none between keys; see the relayability floor below). A
-  balance too small to pay out on-chain settles here at full value in
-  the sense that matters off-chain: it becomes a fully-valued, *cooperatively
-  usable* `pubkey` VTXO — spendable by arkoor, refreshable in a round. A
-  sub-dust VTXO is not, however, *independently* unilaterally exitable: like
-  any sub-dust output, its own isolation-fanout level is non-standard to
-  broadcast alone, so it exits only alongside its isolation cohort or by a
-  cooperative spend. "Full value" here means off-chain usability, not
-  standalone on-chain exit. (Binding the user side to `A` keeps the
-  whole destination set verifiable from the server's own records; loosening
-  it — paying third parties directly out of the close — would not disturb the
-  server-share rule, but stays out until something needs it.)
-* **The split response must be relayable (the standardness floor).** The
-  transaction the server broadcasts in the split response — the checkpoint
-  spending the channel VTXO output, or the arkoor transaction when
-  `use_checkpoint = false` — MUST be standard, or the defense of "Registration
-  and the split response" can never reach a mempool. The server MUST verify
-  this on the **reconstructed conflict-winning transaction directly**: beyond
-  the single P2A anchor it MUST carry no output below `P2TR_DUST` (Bitcoin Core
-  relays at most one dust output per transaction). Two rules make that
-  reachable, and ARK #5's permissive "MAY mix without isolation" does **not**
-  apply to a downgrade:
-  * **Net per-key totals, not per-entry.** A side's balance may be carried by
-    more than one wire entry only as the isolation lender fragment (below); a
-    requester MUST NOT otherwise fragment a side into several same-key
-    destinations to force multiple sub-dust outputs into the conflict-winning
-    transaction. The direct standardness check above rejects any split that
-    would.
-  * **Sub-dust side ⇒ mandatory isolation, and `V ≥ 2·P2TR_DUST`.** When one
-    side's balance `d` is below `P2TR_DUST` (call it `D`), the split MUST
-    isolate it: the request routes `d` together with a lender fragment `D − d`
-    split off the other side through the combined isolation output (value
-    `D`), leaving the other side's remainder `V − D` as the standalone normal
-    output. This is the one place the wire carries two entries for a single
-    key — the lender's remainder in `outputs` and its `D − d` fragment in
-    `isolated_outputs` — which the net-totals rule permits. The checkpoint is
-    then `[V − D, D, P2A]`, standard iff `V − D ≥ D`, i.e. **`V ≥ 2·P2TR_DUST`
-    (660 sats)**. A downgrade of a channel below that total with a sub-dust
-    side has no standard conflict-winning transaction; the server MUST refuse
-    it (the remaining settlement is the unilateral fallback). This floor is
-    normative, not an economic assumption — BOLT does not forbid a sub-660
-    channel (minimum funding is receiver policy), so the server MUST enforce
-    it rather than assume such channels do not exist.
-* **The server as recipient.** `pubkey(S)` makes the server's share an
-  explicit VTXO the server holds as its own user — roles here are keys, not
-  identities — an explicit share, where a forfeit-based settlement would pay
-  the server implicitly. There is no forfeit in a downgrade; the split spending the
-  channel VTXO output by key path at `nSequence = 0`, ahead of the retired
-  bridge's `exit_delta`, is what plays the forfeit's role (see the response
-  duty, below).
-* **No fee.** Like the upgrade: the split commits no new server capital and
-  inherits the scope's existing maturity, so like any arkoor transfer it is
-  not separately priced.
-* **Inherited scope and the depth bound.** The new VTXOs inherit the input's
-  `expiry_height`, `exit_delta`, and anchor (ARK #5), at one more exit level
-  without a checkpoint or two with one; the user refreshes them per ARK #4 as
-  it would any VTXO. Two depth facts bite. First, the split can be *cosigned*
-  only if the channel VTXO's own depth leaves room: ARK #2 refuses a
-  transition spending an input at depth `≥ max_vtxo_exit_depth`, and a
-  checkpointed split spends the checkpoint output (input depth + 1), so a
-  no-checkpoint split needs input depth `≤ max_vtxo_exit_depth − 1` and a
-  checkpointed one `≤ max_vtxo_exit_depth − 2`. A channel too deep to split
-  MUST refresh first (refresh-then-downgrade), which resets its depth — and
-  the user MUST make that check **before initiating the close**: the close
-  is a one-way door, and a channel found too deep only after it has closed
-  has already lost the refresh remedy (a closed channel cannot teleport),
-  leaving only the unilateral fallback. Second, the split
-  *outputs* may legitimately land at `max_vtxo_exit_depth` (a checkpointed
-  split of an input at `max − 2`, which adds two levels): the funds are fully
-  recovered as `pubkey`
-  VTXOs, but such a maximal-depth VTXO cannot be arkoor-spent again until a
-  round refresh resets its depth — the ordinary deep-VTXO discipline (ARK #5
-  already recommends refreshing an arkoor-received VTXO), not a fund-safety
-  concern.
-
-### Admission
-
-A `channel-funding` VTXO has no user spending clause: every cooperative
-spend of it is a `musig(A, S)` act the server co-authors. The server MUST
-NOT cosign any arkoor spend of a `channel-funding` input except the
-sanctioned split of this section (restated for the generic endpoint in
-ARK #5), and MUST verify the split against the close outcome it recorded
-under "The close" — the close-fixed record written at `ChannelClosed`,
-bound to exactly this backing VTXO. Each party enforces from its own view:
-the client MUST refuse to build, and the server MUST refuse to cosign, a
-split that violates the shape above — no recorded completed close for the
-input's channel, a destination key outside `{A, S}`, a per-key total
-differing from the close-fixed balances, or a reconstructed conflict-winning
-transaction that is not standard (the relayability floor).
-
-**The spent-state is a single atomic reservation (normative).** The property
-that no VTXO is ever consumed by two settlements is not an incidental
-consequence of any one flow's bookkeeping but a MUST on the server: every
-**server-mediated** consumer of a VTXO — `prepare_offboard` /
-`finish_offboard` (ARK #7), the arkoor cosign incl. this split (ARK #5), and
-round participation (ARK #4) — MUST check-and-set *one* atomic per-VTXO
-spent-or-reserved state, so that a VTXO reserved or spent by any of them is
-refused by all the others until it is released or resolved. An implementation
-that guards these flows with independent locks is non-conforming.
-(Unilateral exit is *not* a server-mediated flow and is not governed by this
-reservation; its races are the on-chain `nSequence = 0`-versus-`exit_delta`
-semantics of the split response and "Unilateral exit / force-close".)
-
-Under that reservation the ordering is definite: the split's spent-mark is
-written before signing (ARK #5) and is never unwound — un-marking would
-leave the user holding a completable split while another flow consumes the
-same output, two `nSequence = 0` spends racing with no defender's lead. The
-choice of settlement is therefore made at the split cosign, not at
-registration. Retries of the split itself follow ARK #5's
-operation-identity rule unchanged.
-
-### Registration and the split response
-
-**What the downgrade takes from "The close," and what it does not.** The
-downgrade shares the close's balance half exactly: the BOLT close fixes the
-final balances (the object the split is verified against), and the signed
-closing transaction is the user's fallback between close and settlement,
-under the same retention and force-close-deadline discipline. It does **not**
-prescribe any other Ark-leg recovery: the downgrade's point of no return
-and its recovery are the split's own, specified here.
-
-The ordering and recovery posture are the upgrade's, run in reverse. The
-arkoor txids are witness-independent, so the user verifies every partial
-signature and completes the split knowing exactly the transactions the
-server can later hold; until the user registers the signed transactions
-(ARK #5), the server holds only its own partials (first-signer one-shot,
-ARK #0) and cannot actualize the split — so the closing-transaction
-fallback of "The close" remains *safe*, not merely available. Registration
-is the point of no return: it is what arms the server's response and
-retires the fallback. **Registration here means the complete split** — every
-arkoor level of *both* the `pubkey(A)` and `pubkey(S)` outputs, not ARK #5's
-"at minimum the checkpoint" — because the server's response (below) and its
-own `pubkey(S)` share are actualizable only if it durably holds the whole
-signed chain; a server MUST NOT treat a downgrade as registered, arm its
-response, or consider the settlement final until it does. Concretely:
-
-* Before registration is eligible to have been sent, a failed exchange
-  leaves a closed channel and an unresolved (possibly spent-marked) VTXO:
-  retry the cosign under ARK #5's operation-identity rule, or fall back to
-  the unilateral close path — old chain, bridge, closing transaction —
-  before the force-close deadline, which the closed channel keeps until a
-  split is registered ("The close").
-* From the moment registration is eligible to have been sent, and across
-  any restart, the user MUST NOT broadcast the old scope — the split
-  outraces the bridge, so the fallback can no longer win, and the user does
-  not need it to: its balance is the new `pubkey` VTXO(s), recovered if
-  need be by replaying the idempotent registration. Ordinary VTXO
-  discipline governs from here, against the inherited expiry.
-
-Registration arms the **split response** — the parent-exit response of the
-upgrade, made symmetric, because for the first time both parties hold value
-behind the retained transactions. The old scope's exit chain remains fully
-signed in both parties' hands, and the bridge (delayed `exit_delta`) is its
-only other spender, so whoever actualizes the old chain opens the same
-race the forfeit-watch pattern answers. Each duty is an observable property
-that MUST survive a crash:
-
-* The server MUST retain the fully signed split transactions from
-  registration, and MUST watch for any prefix of the channel VTXO's exit
-  chain confirming, for as long as the retired bridge remains confirmable:
-  until the channel VTXO's output is conclusively spent on-chain, or a
-  confirmed expiry sweep of an ancestor has made its creation impossible.
-  Onward movement of the split outputs does not end the duty — it raises
-  the stakes, since everything cosigned on top of them evaporates if the
-  bridge wins. On seeing the chain confirm, the server MUST broadcast the
-  retained checkpoint (or arkoor) transaction, fee-bumped via its P2A
-  anchor, ahead of the bridge's `exit_delta` window.
-* The user MUST keep the same watch for its own share. The server holds the
-  old scope's signed exit chain too, and its expiry-sweep leaf takes the *whole*
-  output: a server that actualized the old chain and sat out the clock
-  would sweep both balances at expiry. The user's response is the same
-  broadcast — its split transactions are its new VTXOs' genesis levels, so
-  retaining them is not a new obligation, only watching is. Like the
-  refresh deadline, this duty is the user's own protection; it cannot be
-  delegated to the counterparty it defends against. Being scoped to the
-  share, the duty ends when no split output remains the user's own:
-  refreshed, the replacement is anchored independently of the old chain;
-  exited, the response has already been given; spent onward, the recipient
-  inherits the ordinary arkoor sender-history exposure (ARK #5), answered
-  as ever by its refresh recommendation — while the server's watch, which
-  onward movement does not end, continues to defend the whole downstream.
-* The response actualizes part of the new VTXOs' genesis chains and nothing
-  else: the bridge and the closed channel's transactions are unaffected
-  (and now unconfirmable), and the server's expiry-sweep recourse over the
-  actualized outputs is preserved.
-
-**Where the race is decided.** The contested event is the confirmation of
-the exit chain's *final* transaction — the one that creates the channel
-VTXO's output on-chain and thereby starts the bridge's `exit_delta` clock.
-Neither endpoint of intuition is it: not the closing transaction, which
-spends the bridge and merely finishes an already-won fallback, and not the
-bridge's own confirmation, which would leave the whole `exit_delta` window
-undecided. Nor is it any earlier prefix of the chain confirming: prefixes
-are shared ancestors that actualize whenever a co-user of the same tree
-exits, the contested output does not yet exist, and no clock runs — a
-confirmed prefix sharpens the watch (the duty above) but decides nothing,
-and in particular MUST NOT be treated as the fallback in progress. What
-the final transaction's confirmation means is fixed by whether the
-complete split was registered when it happened. Registered first: the
-armed response wins by construction — the retained conflict-winning
-transaction spends the just-actualized output at `nSequence = 0`,
-`exit_delta − 1` blocks ahead of the bridge — and the split settles the
-close. Confirmed first, split unregistered: the settlement is the
-unilateral fallback, already in progress — the server holds no signed
-response and its watch resolves with none — and the server MUST refuse the
-split's registration from then on, even though the bridge's `exit_delta`
-has not yet elapsed and a late-armed response could in principle still
-outrace it. The reason is that the two settlements conflict only at the
-contested output, while a VTXO's value is not that output but the server's
-off-chain recognition of it, which no on-chain conflict polices: a server
-that recognized the split after conceding the chain race would settle the
-same close twice — the closing transaction pays the final balances on-chain
-while the registered VTXOs are honored off-chain, paying the user's side
-twice. The refusal extends the settlements' on-chain mutual exclusion to
-that recognition, and is the downgrade's counterpart of the upgrade's
-late-registration refusal ("Open by upgrade"), where completing after the
-abort would release the channel instead.
-
-### Sequence
-
-```
- 1. [BOLT]  shutdown (either peer) → no new HTLCs; in-flight HTLCs resolve →
-            closing negotiation → fully signed closing tx in hand
-            → record the close outcome (exact backing, final balances,
-              closing tx)
-            ──────── the channel is now closed; final balances fixed ────────
- 2. [local] build the split over the channel VTXO: destinations pubkey(A) /
-            pubkey(S), per-key totals = the close-fixed balances, dust and
-            checkpoint per ARK #5 and server policy
-            ──────────────── LAST FULLY-FREE ABORT ────────────────
- 3. [Ark]   arkoor_cosign_request (single part; the sanctioned split) →
-            server verifies against the recorded close outcome, persists the
-            input as spent, returns the ARK #5 partial signatures
- 4. [local] verify every partial signature and complete; the new VTXOs' full
-            exit story is now held (the closing-tx fallback is still safe)
- 5. [Ark]   register the signed transactions (ARK #5)
-                                                *** POINT OF NO RETURN ***
- 6. [both]  retain the split transactions and watch the old chain (the split
-            response, symmetric); the user's balance is ordinary pubkey
-            VTXOs — refresh before the inherited expiry as usual
-```
-
-A failure at step 2 costs nothing and keeps every option open: split,
-or the unilateral fallback. From the moment step 3's request is
-eligible to have been sent, the settlement is committed to the split — the
-spent-mark forecloses any other consumer of the backing ("Admission") — and a failure at steps
-3–4 leaves retry under the operation-identity rule, or the unilateral
-fallback, which stays safe until step 5. Step 5 is the one-way door, with
-its recovery — idempotent registration, then ordinary VTXO custody —
-specified above. Open = upgrade (over any `pubkey` VTXO — a fresh board
-included), close = downgrade (followed by the generic ARK #7 offboard when
-an on-chain exit is wanted): a channel touches the generic flows at exactly
-three seams — upgrade, refresh, downgrade — and every other operation is
-plain-VTXO Ark.
-
-## Unilateral exit / force-close
-
-When the server is unavailable or uncooperative, the user recovers its funds
-with no help, by exiting the channel VTXO on-chain, broadcasting the bridge, and
-force-closing the channel. The halves compose: the VTXO exit (ARK #6) brings the
-channel VTXO output on-chain; the bridge actualizes the funding output; the
-force-close (BOLT) then spends it.
-
-1. **Exit the VTXO (ARK #6).** Broadcast the channel VTXO's genesis chain, root
-   first, until the `channel-funding` output is confirmed on-chain. This is an
-   ordinary emergency exit: TRUC (v3) transactions, P2A/CPFP fee-bumping, each
-   level after its parent confirms.
-2. **Broadcast the bridge.** The presigned bridge spends the channel VTXO output
-   and produces the funding output. Its input carries a relative timelock of
-   `pinned_exit_delta` (`nSequence`; see "The channel VTXO and the bridge transaction"),
-   so the bridge becomes valid only `pinned_exit_delta` blocks after the VTXO output
-   confirms — the channel's unilateral-exit delay, the *same* a `pubkey` exit
-   waits (ARK #6). It is a TRUC v3, P2A/CPFP transaction like the genesis chain.
-3. **Force-close.** Broadcast the latest commitment transaction, which spends the
-   now-on-chain funding output through the stock BOLT-3 2-of-2 (ECDSA). The
-   commitment carries no extra delay of its own — the exit delay was already
-   served on the bridge input — so it confirms once the bridge does. (After a
-   completed cooperative close whose settlement never resolved, spend the
-   funding output with the closing transaction instead — no `to_self_delay`,
-   no HTLCs; see "The close".)
-4. **Claim.** Once the commitment confirms, claim its outputs (`to_local`,
-   `to_remote`, and resolved HTLCs) per the Ark channel type's BOLT-3 rules
-   (referenced).
-
-Unlike a `pubkey` exit (ARK #6), there is no VTXO-level `delayed-sign` claim; the
-channel VTXO's value is claimed only through the bridge and then the commitment.
-
-### Server recourse after expiry
-
-The channel VTXO output's `timelock-sign(expiry_height, S)` leaf lets the server,
-after `expiry_height`, sweep the channel VTXO output directly — without the bridge
-or commitment — just as it may sweep any unspent cosign-taproot output past expiry
-(ARK #4, ARK #6). This is the server's recourse when a user has actualized the
-VTXO output on-chain but left the channel otherwise unresolved (for example,
-exited the VTXO but never broadcast the bridge). It is bounded by `expiry_height`,
-which is why the user MUST refresh or close before expiry.
-
-### The refresh / force-close deadline
-
-The expiry sweep above sets a hard deadline: the user MUST get the **bridge
-confirmed before `expiry_height`**. Once the bridge confirms, the funding output
-is an ordinary on-chain UTXO and the expiry-sweep leaf — which sat on the
-now-spent VTXO output — can no longer reach it; the commitment and any HTLCs then
-resolve on their own BOLT-3 timelocks, no longer bounded by `expiry_height`.
-Before the bridge confirms, the whole channel VTXO — both balances and any
-in-flight HTLC value — is exposed to the sweep.
-
-Reaching that point unilaterally takes, in series: the genesis exit chain (the
-VTXO's exit depth, at most the scope's pinned
-`channel_max_vtxo_exit_depth`, each level confirming), the bridge's
-`pinned_exit_delta` relative timelock, and the bridge's own confirmation, plus
-fee-bumping slack. The user MUST therefore begin a force-close at least
-`channel_max_vtxo_exit_depth + pinned_exit_delta` blocks — plus confirmation and
-fee-bumping slack for the genesis levels and the bridge — before that scope's
-fixed `expiry_height`. The deadline is the **bridge's** confirmation: the
-commitment confirms only after the bridge and, once the bridge has spent the VTXO
-output, is no longer bounded by `expiry_height` (above), so it does not enter this
-margin. The user SHOULD refresh, which resets `expiry_height`, well before that:
-the same exit-before-expiry discipline as any VTXO (ARK #6), with the bridge's
-`pinned_exit_delta` added to the margin.
-
-This interacts with HTLCs. A refresh quiesces the channel — which needs no
-*pending* (uncommitted) HTLC updates in flight — and **carries** any committed
-HTLCs across to the new scope, like a splice (see "The teleport protocol"), so a
-committed HTLC does not by itself block the refresh. What blocks it is an
-**unresponsive peer**: both quiescence and the teleport's `commitment_signed`
-exchange need the peer, so if it stops responding near the deadline the refresh
-cannot complete and the node must force-close unilaterally instead. The user
-MUST therefore stop offering new HTLCs on the channel, and refresh or
-force-close, once that scope's fixed `expiry_height − real_chain_height`
-falls to the **larger** of (a) the force-close margin above
-(`channel_max_vtxo_exit_depth + pinned_exit_delta` + slack, which gets the bridge
-confirmed) and (b) the full on-chain HTLC-resolution budget for any HTLC it must
-still drive (the `cltv_expiry_delta` budget of "The Ark channel type",
-`2 · pinned_exit_delta + channel_max_vtxo_exit_depth` + margin). This is a
-maximum, not a sum: budget (b) already contains the genesis-plus-bridge climb of
-(a) as its first `pinned_exit_delta + channel_max_vtxo_exit_depth`, then adds the
-success-path CSV's second `pinned_exit_delta` on the confirmed commitment — so
-(b) dominates whenever an in-flight HTLC must be resolved on-chain, while (a)
-governs only an idle channel. Adding the two would double-count the shared
-force-close prefix.
-
-A channel carried too close to expiry — for example one an unresponsive peer
-prevents refreshing — can lose the entire VTXO to the sweep. This deadline is
-the user's own discipline, not a forwarding restriction on the server: the
-server's expiry-sweep leaf *gains* the whole channel on a missed deadline (see
-"Security and trust notes"), so it has no aligned incentive to stop forwarding
-HTLCs onto a channel nearing expiry. The user cannot rely on it and MUST protect
-itself by refreshing in time.
-
-## Messages
-
-Channels reuse the Ark messages of ARK #5 (arkoor) and ARK #4 (round); the
-sections below give the channel variant of each affected
-message in full — base fields as defined in its home document, with the
-channel-specific fields called out. Every channel-specific field is absent for
-a non-channel operation, and a peer that does not implement channels ignores it
-(see "Compatibility"); no other Ark message changes for channels, and channels
-add no new Ark RPC. (The refresh teleport adds messages on the Lightning
-transport, not the Ark service; see "The teleport protocol.")
-
-### `leaf_vtxo_cosign` (ARK #4)
-
-Request (channel refresh): the ARK #4 fields — `vtxo_id`, user `pub_nonce` (bound
-to the leaf sighash) — plus, for a channel leaf: `channel_id` (32 bytes, the
-BOLT-2 channel id of the channel being refreshed) and `bridge_pub_nonce` (the
-user's nonce for the new bridge's key-path sighash). Both are absent for a non-channel
-leaf. Response: as ARK #4 (server `pub_nonce`, `partial_sig`, first-signer
-one-shot), extended with the server's bridge `pub_nonce` + `partial_sig`.
-
-The server reconstructs and cosigns both the new leaf exit
-tx and the new **bridge** in this one exchange, using the funding keys it already
-holds for `channel_id` — the new bridge reuses the channel's existing funding keys
-(it does not rotate them; see "The teleport protocol"). If `channel_id` names no
-channel it knows (with a funding key it controls), it MUST NOT cosign. For a leaf
-whose policy is `channel-funding`, `channel_id` and `bridge_pub_nonce` MUST be
-present, and the server MUST NOT cosign such a leaf without also cosigning its
-bridge — the no-bridgeless-VTXO rule of the board cosign, above. The server
-also independently learns the channel from the forfeited input on the round
-participation and from `teleport_init`. It MUST ensure the refresh is a genuine,
-value-conserving re-pointing of the named channel — the channel's current backing
-VTXO is forfeited in the round (round value-conservation already guarantees the
-new funding leaf is covered by the forfeited value) — and MUST refuse to cosign a
-bridge that would move *another* channel's backing VTXO into this channel's
-funding 2-of-2. It need NOT atomically pin the specific new leaf `vtxo_id` to the
-specific forfeited outpoint: value conservation plus the channel↔forfeit
-correlation already prevent a free or cross-channel funding, and a client
-re-pointing its own channel onto a different leaf it owns (value-conserved, not
-another channel's) is not an attack. This looser binding is deliberate — it leaves
-room for future refresh extensions that combine channels (several forfeited VTXOs
-re-pointed into one channel, or splices), which a strict 1:1 forfeit↔leaf pin
-would foreclose. The participation gate of "Refresh admission and the server
-gate" is different: it pins the exact **old** backing and participation for every
-affected channel, not a particular new leaf at admission. For the selected
-`vtxo_id`, however, the server MUST decode the
-actual VTXO and reconstruct the bridge only from that VTXO's actual
-`channel-funding` output, including its point, scriptPubKey, value, expiry, and
-pinned `exit_delta`; it MUST NOT reconstruct from response metadata.
-
-### `arkoor_cosign_request` (ARK #5)
-
-The channel variant is the ARK #5 `arkoor_cosign_request` with the board
-variant's two fields added, carried on the part whose destination set includes
-the `channel-funding` output; the server cosigns the transfer and the bridge in
-one exchange. A package MUST carry at most one part with these fields (exactly
-one `channel-funding` destination; "Open by upgrade").
-
-| Field | Type | Meaning |
-|---|---|---|
-| *ARK #5 part fields* | | `input`, `outputs`, `isolated_outputs`, `use_checkpoint`, `user_pub_nonces`, `attestation` — unchanged (ARK #5) |
-| `channel_id` | 32 bytes | the channel's id: the upgrade assigns the funding outpoint before this cosign, so this is the channel's **permanent** BOLT-2 id; its presence marks the part as an upgrade and it MUST match the identifier under which the server stored the channel's funding keys |
-| `bridge_pub_nonce` | musig_pub_nonce | the user's MuSig2 public nonce for the **bridge** key-path sighash |
-
-From these the server reconstructs the ARK #5 transactions exactly as the
-generic endpoint does, then the bridge — input = the `channel-funding` output
-of the reconstructed transfer (keyspend `musig(A, S)`,
-`nSequence = pinned_exit_delta`, the input VTXO's decoded `exit_delta`),
-output 0 = P2WSH 2-of-2 of the channel's funding keys (looked up by
-`channel_id`), output 1 = P2A, 0-fee (see "The channel VTXO and the bridge
-transaction"). The response is the ARK #5 `arkoor_cosign_response`, extended
-with the server's bridge `pub_nonce` + `partial_sig`. The attestation is the
-unchanged ARK #5 attestation: the destination's policy bytes already commit
-the `channel-funding` `user_pubkey` and amount, and a tampered `channel_id`
-yields a bridge over the wrong funding keys, which the client rejects at
-partial-signature verification, before completing anything.
-
-Requirements (server): the ARK #5 requirements apply, and additionally —
-
-* When `channel_id` is present, the named channel MUST be one the server is
-  opening: funding keys exchanged, not yet operating (no prior funding
-  registered, `ChannelReady` never sent), and its Lightning establishment run
-  against exactly the funding output this cosign produces. Two equalities
-  bind that: the channel's assigned funding outpoint MUST equal the
-  reconstructed transfer's `bridge_txid:0`, and the reconstructed bridge's
-  output 0 MUST equal the channel's negotiated funding output — value equal
-  to the negotiated funding amount (equivalently: the `channel-funding`
-  destination's amount MUST equal `open_channel.funding_satoshis`), script
-  the P2WSH 2-of-2 of the stored funding keys. The outpoint alone does not
-  bind the amount: the txid commits the bridge's value, but nothing ties the
-  *negotiated* amount to it, and the Lightning stacks sign every commitment
-  over the negotiated amount (BIP-143 commits the input value) — a mismatch
-  yields commitments unusable against the real output, an unexitable
-  channel, and, once the bridge confirms, funds stranded in a 2-of-2 no
-  expiry leaf reaches. (The upgrade exchanges the initial commitment
-  *before* the cosign, so an assigned funding
-  outpoint is **required** here; these equalities are what
-  prevent a cosign from being redirected at an already-funded channel.) If
-  `channel_id` names no such channel, or either equality fails, the server
-  MUST NOT cosign any part of the package.
-* The server MUST NOT cosign a `channel-funding` destination except together
-  with its bridge in the same exchange — the no-bridgeless-VTXO rule (a
-  channel-funding output has no user spending clause without its bridge).
-  Equivalently: a request with a `channel-funding` destination
-  and no `channel_id` MUST be rejected (restated for the generic endpoint in
-  ARK #5).
-* The admission rules of "Open by upgrade" apply: the self-spend binding (the
-  `channel-funding` destination's `user_pubkey` equals the input's user key),
-  the resulting-depth bound, the runway floor, and the pinned `exit_delta`.
-* For a single-part package whose destination set is exactly the one
-  `channel-funding` output, the server SHOULD accept `use_checkpoint = false`
-  ("Open by upgrade"); every other shape follows its ordinary checkpoint
-  policy (ARK #5).
-
-Retries follow ARK #5's operation-identity rule, with the channel fields
-inside it: `channel_id` joins the part's operation identity, and in a
-re-signed session the bridge slot gets fresh nonces and a fresh partial
-exactly like the transfer slots. As everywhere (ARK #4 failure handling),
-the user MUST discard and regenerate its secret nonces for
-every slot — the bridge's included — on any retry; a secret nonce never
-participates in more than one signing session.
-
-**The downgrade split.** The downgrade ("Downgrade: close into Ark balance")
-also rides this endpoint, and adds *no* fields: a downgrade request is a
-plain ARK #5 request — no `channel_id`, no bridge nonce, since the split
-produces only `pubkey` outputs and there is no bridge to cosign — whose
-input carries the `channel-funding` policy. The server MUST accept such an
-input exactly when the request is the sanctioned split of a recorded
-completed close, verified per that section's admission rules against its own
-record of which channel the input backs, and MUST reject every other arkoor
-spend of a `channel-funding` input. Retries follow the operation-identity
-rule unchanged.
-
-### `submit_round_participation` response (ARK #4)
-
-The ARK #4 response carries `unlock_hash` (32 bytes). For a channel-refresh
-participation the server MAY instead return a cap in its place:
-
-| Field | Type | Presence |
-|---|---|---|
-| `unlock_hash` | 32 bytes | accepted — identifies the participation (ARK #4) |
-| `counter_max_issuable_sat` | u64 sats | capped — the maximum `channel-funding` output the server will issue when it declines the requested amount (at most `V_old − fee − X`, folding in the required fee and its liquidity withdrawal `X`; see "Server liquidity adjustment") |
-
-Exactly one of the two is present. Requirements (participant): on receiving
-`counter_max_issuable_sat` (and no `unlock_hash`), the participant MUST resubmit
-requesting a `channel-funding` output no larger than the cap, or abandon the
-refresh; it MUST NOT proceed at the original amount.
+The core plus both extensions: the Ark channel type replaces the per-HTLC
+race exposure on **materialized HTLC outputs** with the party-keyed claim
+delays' server response window (raising the client receiver's per-HTLC
+threshold to its budget); trimmed HTLCs have no output to order, so
+dust-exposure bounds remain. Refresh lifts the expiry treadmill.
+The intermediate profiles — the core plus exactly one extension — are
+coherent, since each extension stands alone on the core, but they are not
+deployment targets of the reference.
 
 ## Compatibility
 
 The channel work extends the protocol without disturbing existing flows.
 
-* **Additive messages.** The channel additions on the arkoor cosign request
-  (`channel_id` + `bridge_pub_nonce`), the leaf cosign request (the same
-  pair), and the round participation response are optional. A peer
-  that does not implement channels ignores them, and the board, arkoor, refresh,
-  and offboard flows are unchanged for non-channel VTXOs. The downgrade adds
-  no fields at all; the question of a channel-unaware server never arises for
-  it, since only a channel-aware server can have cosigned its
-  `channel-funding` input into existence.
-* **Channel support is a capability, not a default.** A channel open or refresh
+* **Additive messages.** The core's additions ride one arkoor cosign
+  exchange: `channel_id` + `bridge_pub_nonce` on the request, the server's
+  bridge nonce and partial signature on the response — all optional. A peer
+  that does not implement channels ignores them, and the board, arkoor,
+  round, and offboard flows are unchanged for non-channel VTXOs. The
+  downgrade adds no fields at all; the question of a channel-unaware server
+  never arises for it, since only a channel-aware server can have cosigned
+  its `channel-funding` input into existence. The refresh extension's
+  equally-optional additions (the leaf cosign request's pair, the round
+  participation response bound) are specified with that extension; the
+  teleport's messages live on the Lightning transport, not the Ark service.
+* **Channel support is a capability, not a default.** A channel open — or,
+  with the refresh extension, a refresh —
   requires a channel-aware server. An open (upgrade) fails safely against a
   channel-unaware server: the `channel-funding` destination policy itself is
   rejected as an unknown policy type (ARK #2), before anything is marked
@@ -1836,7 +2307,7 @@ The channel work extends the protocol without disturbing existing flows.
   advertises channel support with the `supports_channels` flag in ark info
   (ARK #0); a client MUST NOT attempt a channel open against a server that does
   not set it.
-* **New policy type.** A `channel-funding` VTXO (policy type `0x08`) is rejected
+* **New policy type.** A `channel-funding` VTXO (policy type `0x0c`) is rejected
   by decoders that predate it (ARK #2 decoders reject unknown policy type
   bytes), so channel VTXOs are meaningful only between channel-aware parties.
 
@@ -1888,12 +2359,12 @@ The channel work extends the protocol without disturbing existing flows.
   share. This is the deliberate flip side of "Exit guarantee preserved": there
   is no balance-aware split at the sweep, so a channel carried past expiry loses
   the user's *entire* balance, not just the server's recovery. The user's only
-  protection is the deadline — it MUST force-close (actualizing its balance into
-  the commitment's `to_local`, claimable on its own timelock) or refresh before
-  expiry. Users MUST therefore refresh well before expiry — early enough to
-  confirm the bridge first, and while any in-flight HTLC still has the on-chain
-  resolution budget a forced force-close needs (see "The refresh / force-close
-  deadline") — exactly as for any VTXO (ARK #0),
+  protection is the deadline — it MUST settle cooperatively or force-close
+  (actualizing its balance into the commitment's `to_local`, claimable on its
+  own timelock) before expiry. Users MUST therefore act well before expiry —
+  early enough to confirm the bridge first, and while any in-flight HTLC still
+  has the on-chain resolution budget a forced force-close needs (see "The
+  force-close deadline") — exactly as for any VTXO (ARK #0),
   with the bridge's `pinned_exit_delta` added to the margin.
 * **Virtual funding.** The channel operates as though its funding output were
   confirmed while that output — the bridge's output 0 — lives only in the

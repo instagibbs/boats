@@ -79,7 +79,7 @@ Stories apply to both user personas unless marked otherwise.
 * ✅ As a user, I want HTLC time budgets that already account for my longer
   unilateral path (exit chain + bridge + second stage), so no in-flight HTLC
   can outlive my ability to enforce it on-chain. ("The Ark channel type",
-  `cltv_expiry_delta` budget; "The refresh / force-close deadline")
+  `cltv_expiry_delta` budget; "The force-close deadline")
 * 🧭 As a mobile user with no inbound capacity, I want the server to provision
   it **just in time** when a payment is already on the way — the server funds
   a new channel VTXO on the spot and the payment lands in it — so receiving
@@ -113,7 +113,7 @@ Stories apply to both user personas unless marked otherwise.
 * ✅ As a user, I want my wallet to stop offering new HTLCs and force the
   refresh-or-close decision while there is still enough runway to resolve
   everything on-chain — the deadline discipline is computed, not left to
-  judgment. ("The refresh / force-close deadline")
+  judgment. ("The force-close deadline")
 * 🧭 As a mobile user, I never want to *think* about expiry: my wallet
   refreshes opportunistically whenever it is online with margin to spare, and
   warns me out-of-band (push) if the deadline nears without a chance to act.
@@ -146,17 +146,21 @@ Stories apply to both user personas unless marked otherwise.
   force-close, claim per BOLT-3. The costs are stated up front: act before the
   deadline, and hold an on-chain fee reserve to bump the chain. ("Unilateral
   exit / force-close", "Trust assumptions")
-* ✅ As a server, **I never unroll a tree on my own.** Every unilateral
-  broadcast in the system is the user's; my only unilateral on-chain act is
-  the expiry sweep of an output already on-chain. ("Server recourse after
-  expiry")
+* ✅ As a server, **I never unroll a tree on my own.** Every tree and bridge
+  broadcast in the system is the user's; my unilateral on-chain acts are the
+  expiry sweep of an output already on-chain and — once a user has actualized
+  a funding on-chain themselves — a standard Lightning force-close of that
+  channel. ("Server recourse after expiry", "Server recourse after the bridge
+  confirms")
 * ✅ As a server, a user who vanishes forever costs me exactly: capital locked
-  until `expiry_height`, then one sweep transaction. Bounded, priced, and
-  known at admission.
+  until `expiry_height`, then one sweep transaction. A user who actualizes the
+  funding first and then vanishes costs me a standard force-close to recoup
+  whatever the channel owes me — and nothing at all until I have a reason to
+  close. Bounded, priced, and known at admission.
 * ✅ As a server, forfeited state cannot beat me to the chain: a forfeit
   spends ahead of the bridge's `exit_delta` with no timelock, and my
-  forfeit-watch duty — surviving restarts — enforces it. ("The close",
-  after-the-forfeit; ARK #7)
+  forfeit-watch duty — surviving restarts — enforces it. ("Refresh", the
+  close and watch composition; ARK #7)
 * ✅ As a user, a server that broadcasts revoked channel state is punished
   exactly as in stock Lightning — BOLT-3 penalties, unchanged, including
   second-stage claims along the Ark exit path.
@@ -173,12 +177,18 @@ Each of these is a *cannot happen, because* claim, not a policy.
   hurts the declarer. ("Server liquidity adjustment")
 * ✅ A closed-and-paid channel gives the user no second claim: after the
   forfeit, neither commitment nor closing transaction can reach the chain.
-* ✅ An expired HTLC resolves deterministically to the timeout side: only the
-  success path carries the pinned `exit_delta` CSV — the timeout claim is
-  baseline BOLT-3 and strictly leads any late preimage claim — and the
-  success-path delay is priced into the CLTV budget, with the
-  success-CSV-equals-pinned-`exit_delta` binding self-checked at board
-  cosign. ("The Ark channel type", HTLC success-path CSV)
+* ✅ A contested on-chain HTLC gives the server a response window: every
+  client-resolving branch carries the pinned `exit_delta` CSV, so the
+  server's preimage claim on a client-offered HTLC always matures at
+  least `exit_delta − 1` blocks ahead of the client's timeout, and its
+  timeout on a server-offered HTLC matures ahead of a late preimage
+  claim whenever the close was timed against the CLTV — the region an
+  adversary controls. The window protects a server that responds within
+  it, and the client-side delay is priced into the client receiver's
+  CLTV budget. The delays-equal-pinned-`exit_delta` derivation is guarded by an
+  implementation self-check at the open cosign; the protocol itself
+  surfaces a divergence only at the first HTLC's commitment exchange.
+  ("The Ark channel type", party-keyed HTLC claim delays)
 * ✅ Neither side's crash creates a window for the other: everything
   safety-critical is stated as an observable property that must survive a
   crash — close outcomes, teleport promotion, forfeit watching — and a party

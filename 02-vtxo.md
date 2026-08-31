@@ -146,7 +146,7 @@ Fields: `user_pubkey` (33) ‖ `payment_hash` (32) ‖ `htlc_expiry` (u32) ‖
   — user claims with the preimage; the longer delay gives the server time to
   use its expiry path if the user exits too late
 
-#### `channel-funding` (type byte `0x08`)
+#### `channel-funding` (type byte `0x0c`)
 
 The backing output of a Lightning-channel VTXO (ARK #8). It is *not* the
 channel's funding outpoint: the funds reach the Lightning commitment through a
@@ -167,10 +167,25 @@ ARK #8).
   used to forfeit, refresh, or cooperatively spend the VTXO
 * leaf: timelock-sign `(expiry_height, S)` — the server sweeps after expiry, when
   the VTXO's tree is left to time out
+* leaf: a constant, unspendable **domain-marker** with no spending semantics
+  (see below) — the 34-byte tapscript `OP_RETURN <C>` (serialized
+  `0x6a 0x20 ‖ C`) at leaf version `0xc0`, where `C` is the 32-byte BIP-340
+  tagged hash `tagged_hash("ark/channel-funding-domain-v1", "")` (empty
+  message):
+  `C = f1133dc97acd5b911650249644ae9e7345fc26df8ea500662f2fb38ce55ea609`
 
-This is the **cosign taproot** `(musig(A, S), S, expiry_height)` (see "Shared
-taproot constructions") — the same construction as a board funding output, with
-`A` = `user_pubkey`. It differs from `pubkey` in its leaf set: the user's
+Its cooperative key and expiry leaf are the same as a board funding output's,
+but it is **deliberately not** the bare board construction: it carries the
+domain-marker leaf so that its output key is distinct from a board funding
+output's for the same `(A, S, expiry_height)`. Domain-separating a distinct
+VTXO type this way means a cosignature produced over one type's output can
+never be a valid cosignature over another's. The marker is never revealed
+on-chain: `OP_RETURN` fails script execution immediately, making the leaf
+provably unspendable, so only its leaf hash ever surfaces — as the 32-byte
+sibling in the expiry leaf's control block when the server's post-expiry
+sweep spends. Both leaves sit at depth 1; BIP-341 branch hashing sorts the
+pair, so the output key is independent of construction order. It differs
+from `pubkey` in its leaf set: the user's
 `delayed-sign(exit_delta, A)` unilateral-exit leaf is dropped — a channel VTXO's
 unilateral-exit delay rides on the bridge transaction's input `nSequence`
 (ARK #8), not on a VTXO leaf — and the server's expiry leaf, which `pubkey` does
